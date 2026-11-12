@@ -116,13 +116,16 @@ DataNex corre en **AWS Athena, que admite consultas de hasta 262.144 bytes**: `f
 
 | `--precision` | Qué se guarda | Error frente al modelo original (medido) |
 |---|---|---|
-| `float32` (defecto) | todo parámetro (coeficientes, pesos, sesgos, umbrales, hojas, medias, escalas, imputaciones) en float32; arrays de 4 bytes; cuentas en double | ~10⁻⁹ a 2·10⁻⁶ en la probabilidad; mismo AUC |
+| `float32` (defecto) | todo parámetro (coeficientes, pesos, sesgos, umbrales, hojas, medias, escalas, imputaciones) en float32; arrays de 4 bytes; cuentas en double | de 4·10⁻⁹ a 2·10⁻⁶ en la probabilidad |
 | `float64` | exacto; arrays de 8 bytes | 0 (redondeo de la suma, ~10⁻¹⁶) |
-| `int8` | pesos de cada neurona, coeficientes y hojas de cada árbol como enteros de -127 a 127 con una escala float32 por neurona / modelo / árbol; umbrales, sesgos y preproceso en float32 | de 4·10⁻⁴ a 8·10⁻² en la probabilidad (medio, 10⁻⁴ a 3·10⁻³) y de 4·10⁻⁵ a 3·10⁻³ en el AUC |
+| `int8` | pesos de cada neurona, coeficientes y hojas de cada árbol como enteros de -127 a 127 con una escala float32 por neurona / modelo / árbol; umbrales, sesgos y preproceso en float32 | de 4·10⁻⁴ a 8·10⁻² en la probabilidad (medio, 10⁻⁴ a 3·10⁻³) |
 
 Los errores son los del experimento de mortalidad (620 ingresos de FakeNex, nueve modelos). int8 reduce sobre todo las
 redes (red 128+64 de práctica: 85 → 33 KB) y menos los árboles (random forest: 60 → 51 KB), porque los umbrales se quedan
-en float32: cuantizarlos mandaría pacientes enteros a otra rama. Úsalo solo si float32 no cabe.
+en float32: cuantizarlos mandaría pacientes enteros a otra rama. Úsalo solo si float32 no cabe. Techo aproximado de una
+red en int8: ~160.000-180.000 parámetros (float32: ~45.000; float64: ~22.000). Probado con una red de práctica de
+152.577 parámetros (40 → 512 → 256 → 1): 224.000 bytes (en float32 serían 827 KB), un paciente en 15,7 s (9,5 s de
+planificación, 9 MB de memoria) y SQL idéntico al documento int8.
 
 Los umbrales se redondean según cómo compara el modelo original, para que un valor igual al umbral caiga del mismo lado:
 
@@ -216,23 +219,25 @@ estima escalando su tiempo en FakeNex por la razón de las referencias, sobre to
 | variables del XGBoost real (195) | 7,2 (2,6) | 7,4 (3,5) | 7,2 (3,1) | 8,4 (3,2) | 16,2 (3,1) |
 
 **Experimento de desarrollo** (modelos de mortalidad entrenados con 15.000 pacientes sintéticos generados con FakeNex;
-versiones SQL finales; AUC sobre 620 ingresos de 250 pacientes de FakeNex, 44 muertes). Reloj (servidor):
+versiones SQL finales; diferencia máxima de probabilidad entre el SQL y el modelo original en 620 ingresos de 250
+pacientes de FakeNex). Reloj (servidor):
 
-| Versión (float32) | KB 1 pac. | KB 250 pac. | Cabe en Athena | AUC modelo | AUC SQL | Dif. | 1 pac. | 10 | 50 | 100 | 250 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Regresión logística | 21 | 40 | sí | 0,7730 | 0,7730 | 0 | 7,1 (3,4) | 7,3 (3,3) | 7,8 (4,7) | 7,8 (3,4) | 8,4 (4,1) |
-| Gradient boosting | 49 | 69 | sí | 0,8119 | 0,8119 | 0 | 7,2 (2,7) | 9,1 (3,2) | 11,8 (4,2) | 14,7 (3,5) | 33,3 (10,9) |
-| Random forest | 113 | 133 | sí | 0,7756 | 0,7756 | 0 | 8,9 (3,5) | 9,6 (4,0) | 9,6 (3,9) | 17,2 (5,0) | 21,0 (5,0) |
-| Red 8 | 25 | 44 | sí | 0,7573 | 0,7573 | 0 | 5,4 (2,8) | 5,9 (2,7) | 6,2 (3,1) | 8,3 (3,8) | 12,0 (5,2) |
-| Red 32 | 37 | 57 | sí | 0,7967 | 0,7967 | 0 | 7,0 (2,7) | 6,7 (3,3) | 7,1 (3,0) | 8,3 (4,3) | 9,9 (6,0) |
-| Red 128+64 | 130 | 150 | sí | 0,8181 | 0,8181 | 0 | 8,0 (3,3) | 8,1 (2,9) | 12,0 (5,4) | 10,3 (5,7) | 17,4 (10,4) |
-| PCA (60) + boosting | 109 | 129 | sí | 0,7814 | 0,7814 | 0 | 20,9 (10,7) | 20,6 (9,5) | 25,6 (13,4) | 25,0 (12,5) | 57,1 (15,2) |
-| KNN (k = 150, bolsa = FakeNex) ¹ | 40 | 60 | sí | 0,7374 | 0,7374 | 0 | 22,4 (17,5) | 18,8 (15,1) | 26,6 (21,5) | 33,9 (30,0) | 58,3 (54,0) |
-| XGBoost real | 188 | 199 | sí | — | — | — | 7,0 (3,2) | 7,1 (3,1) | 8,5 (4,1) | 7,6 (3,4) | 14,3 (6,6) |
+| Versión (float32) | KB 1 pac. | KB 250 pac. | Dif. máx. prob. | 1 pac. | 10 | 50 | 100 | 250 |
+|---|---|---|---|---|---|---|---|---|
+| Regresión logística | 21 | 40 | 3·10⁻⁷ | 7,1 (3,4) | 7,3 (3,3) | 7,8 (4,7) | 7,8 (3,4) | 8,4 (4,1) |
+| Gradient boosting | 49 | 69 | 2·10⁻⁸ | 7,2 (2,7) | 9,1 (3,2) | 11,8 (4,2) | 14,7 (3,5) | 33,3 (10,9) |
+| Random forest | 113 | 133 | 4·10⁻⁹ | 8,9 (3,5) | 9,6 (4,0) | 9,6 (3,9) | 17,2 (5,0) | 21,0 (5,0) |
+| Red 8 | 25 | 44 | 8·10⁻⁷ | 5,4 (2,8) | 5,9 (2,7) | 6,2 (3,1) | 8,3 (3,8) | 12,0 (5,2) |
+| Red 32 | 37 | 57 | 2·10⁻⁶ | 7,0 (2,7) | 6,7 (3,3) | 7,1 (3,0) | 8,3 (4,3) | 9,9 (6,0) |
+| Red 128+64 | 130 | 150 | 1·10⁻⁶ | 8,0 (3,3) | 8,1 (2,9) | 12,0 (5,4) | 10,3 (5,7) | 17,4 (10,4) |
+| PCA (60) + boosting | 109 | 129 | 2·10⁻⁸ | 20,9 (10,7) | 20,6 (9,5) | 25,6 (13,4) | 25,0 (12,5) | 57,1 (15,2) |
+| KNN (k = 150, bolsa = FakeNex) ¹ | 40 | 60 | 2·10⁻¹⁶ | 22,4 (17,5) | 18,8 (15,1) | 26,6 (21,5) | 33,9 (30,0) | 58,3 (54,0) |
+| XGBoost real ² | 188 | 199 | 9·10⁻⁸ | 7,0 (3,2) | 7,1 (3,1) | 8,5 (4,1) | 7,6 (3,4) | 14,3 (6,6) |
 
-Pesos y AUC de las versiones float32; tiempos de la medición anterior (float64), que en float32 son parecidos. Con
-JSON en double, el random forest (399 KB), el PCA + boosting (515), la red 128+64 (461) y el XGBoost real (347) no
-cabían en Athena. ¹ El KNN no tiene arrays de pesos (su bolsa es la propia base): su AUC es el de la versión float64.
+Pesos y diferencias de las versiones float32; tiempos de la medición anterior (float64), que en float32 son parecidos.
+Con JSON en double, el random forest (399 KB), el PCA + boosting (515), la red 128+64 (461) y el XGBoost real (347) no
+cabían en Athena. ¹ El KNN no tiene arrays de pesos (su bolsa es la propia base) y se queda en float64. ² XGBoost ya es
+float32: el SQL hace las mismas cuentas en real que el modelo.
 (PCA + boosting y KNN se probaron en el experimento pero no están en `fnxsql`: el PCA no es un paso de Pipeline admitido
 y el "modelo" de un KNN son sus datos de entrenamiento.)
 
@@ -246,7 +251,7 @@ y el "modelo" de un KNN son sus datos de entrenamiento.)
   por la rama contraria.
 - **El límite de Athena obliga a compactar.** Con literales JSON en double, el random forest (399 KB), el PCA + boosting
   (515 KB), la red 128+64 (461 KB) y el XGBoost real (347 KB) no cabían en 262.144 bytes. En binario float32: 113, 109,
-  130 y 188 KB, con el mismo AUC.
+  130 y 188 KB, con diferencias de 4·10⁻⁹ a 2·10⁻⁶ en la probabilidad.
 - **Redondear un umbral no es neutro.** Los umbrales de HistGradientBoosting coinciden con valores observados; al
   redondearlos al float32 más cercano, 9 recorridos de 620 ingresos cambiaban de rama (5·10⁻⁴ en la probabilidad).
   Redondeando hacia fuera según la comparación: 0.
