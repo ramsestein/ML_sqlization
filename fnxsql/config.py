@@ -18,13 +18,22 @@ MOMENTO_HORAS = 24
 VENTANA_HORAS = 48
 
 # ---------------------------------------------------------------- límites de seguridad (lecciones del experimento)
-MAX_SQL_BYTES = 950 * 1024   # el proxy de FakeNex rechaza más de 1 MiB
+# DataNex corre en AWS Athena, que admite consultas de hasta 262.144 bytes: es el límite por defecto. Con --forzar se
+# permite llegar al del proxy de FakeNex (rechaza más de 1 MiB) para probar algo que no se podría llevar a DataNex.
+MAX_SQL_BYTES = 262_144
+MAX_SQL_BYTES_FAKENEX = 950 * 1024
 MAX_SEGUNDOS_CONSULTA = 180  # una consulta que tarda más detiene la batería
 # Una representación "término a término" de ~20.000 operaciones tumbó el coordinador de Trino al planificar: por encima
 # de este número de términos se exige la representación con arrays (o --forzar).
 MAX_TERMINOS_SQL = 12_000
 
+# ---------------------------------------------------------------- precisión de los parámetros (binario.py)
+# float32: todo parámetro redondeado a float32 y los arrays en binario de 4 bytes (cuentas en double); float64: exacto;
+# int8: pesos, coeficientes y hojas como enteros de 8 bits con una escala float32 por neurona / modelo / árbol.
+PRECISION = "float32"
+
 # ---------------------------------------------------------------- validación
 SEMILLA = 42
 TOLERANCIA_DOUBLE = 1e-9    # modelos que trabajan en double (scikit-learn)
-TOLERANCIA_FLOAT32 = 1e-6   # XGBoost compara y suma en float32
+TOLERANCIA_FLOAT32 = 1e-6   # XGBoost compara y suma en float32 (con cualquier precisión: ya es float32)
+TOLERANCIA_PARAMETROS_FLOAT32 = 1e-5  # modelos en double con los parámetros redondeados a float32 (--precision float32)

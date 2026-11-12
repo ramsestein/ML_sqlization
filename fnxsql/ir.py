@@ -23,7 +23,8 @@ Documento:
        "arboles": [nodo, ...]}   nodo = {"hoja": valor} | {"si": {"variable", "op": "<=" | "<", "valor", "nulo_a_entonces"},
                                                            "entonces": nodo, "si_no": nodo}
             float32 (XGBoost): float32(x) < valor y la suma de hojas en float32; float64 (scikit-learn): x <= valor en double
-            (los umbrales de los árboles de scikit-learn, que compara en float32, se reescriben a su equivalente double)
+            (los umbrales de los árboles de scikit-learn, que compara en float32, se reescriben a su equivalente double y el
+            núcleo lleva "entrada_float32": true, para que el SQL en float32 compare como scikit-learn: float32(x) <= t32)
       {"tipo": "red", "capas": [{"pesos": [[...] por neurona], "sesgos": [...], "activacion": "relu" | "identidad"}]}
             relu: si z > 0 entonces z si no 0; la última capa da el logit; probabilidad = sigmoide
   cond = {"variable", "op": "es_nulo" | "no_es_nulo" | "<=" | ">" | "==" | "en", "valor"/"valores", "o_nulo"}
@@ -187,7 +188,7 @@ def _nucleo_sklearn(est):
                            for j, c in enumerate(coef)]}
     if isinstance(est, (RandomForestClassifier, DecisionTreeClassifier)):
         ests = est.estimators_ if isinstance(est, RandomForestClassifier) else [est]
-        return {"tipo": "arboles", "precision": "float64", "combinacion": "media", "base": 0.0,
+        return {"tipo": "arboles", "precision": "float64", "combinacion": "media", "base": 0.0, "entrada_float32": True,
                 "arboles": [_arbol_sklearn(e.tree_, k1) for e in ests]}
     if isinstance(est, HistGradientBoostingClassifier):
         if est.is_categorical_ is not None and np.any(est.is_categorical_):
@@ -311,7 +312,8 @@ def evaluar(doc, fila):
             a = [zi if (capa["activacion"] == "identidad" or zi > 0) else 0.0 for zi in z]  # ReLU: si z > 0 entonces z si no 0
         return sigmoide(a[0])
     f32 = nuc["precision"] == "float32"
-    hojas = [_recorre(a, x, f32) for a in nuc["arboles"]]
+    ef32 = bool(nuc.get("entrada_float32"))
+    hojas = [_recorre(a, x, f32, ef32) for a in nuc["arboles"]]
     if nuc["combinacion"] == "media":
         return float(sum(hojas) / len(hojas))
     if f32:
@@ -322,7 +324,9 @@ def evaluar(doc, fila):
     return sigmoide(nuc["base"] + sum(hojas))
 
 
-def _recorre(n, x, f32):
+def _recorre(n, x, f32, ef32=False):
+    """ef32: el árbol compara float32(x) (scikit-learn); con el umbral double equivalente o con el float32 de
+    binario.cuantizar el resultado es el mismo. La comparación va en double (NumPy 2 bajaría el umbral a float32)."""
     while "si" in n:
         c = n["si"]
         v = x[c["variable"]]
@@ -331,7 +335,7 @@ def _recorre(n, x, f32):
         elif c["op"] == "<":
             ok = (np.float32(v) < np.float32(c["valor"])) if f32 else v < c["valor"]
         else:
-            ok = v <= c["valor"]
+            ok = (float(np.float32(v)) if ef32 else v) <= c["valor"]
         n = n["entonces"] if ok else n["si_no"]
     return n["hoja"]
 

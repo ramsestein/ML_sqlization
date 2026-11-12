@@ -1,6 +1,6 @@
 """Cliente mínimo de la API REST de Trino de FakeNex (solo biblioteca estándar + pandas) con salvaguardas.
 
-Cada consulta: comprueba antes la salud del servidor (/v1/info), rechaza SQL de más de MAX_SQL_BYTES, reintenta mientras
+Cada consulta: comprueba antes la salud del servidor (/v1/info), rechaza SQL de más de MAX_SQL_BYTES_FAKENEX (el proxy), reintenta mientras
 el servidor arranca y devuelve el resultado, el tiempo de reloj y las estadísticas de Trino (planificación, CPU, memoria).
 """
 import json
@@ -50,8 +50,8 @@ def esperar_salud(max_segundos=300):
 def ejecutar(sql, timeout=180):
     """Ejecuta una consulta de solo lectura: (DataFrame, segundos de reloj, stats de Trino)."""
     datos = sql.encode("utf-8")
-    if len(datos) > C.MAX_SQL_BYTES:
-        raise ErrorFakeNex(f"SQL de {len(datos) / 1024:.0f} KB: supera el límite de {C.MAX_SQL_BYTES / 1024:.0f} KB")
+    if len(datos) > C.MAX_SQL_BYTES_FAKENEX:  # el de AWS Athena (MAX_SQL_BYTES) lo aplica sql.compilar, salvo --forzar
+        raise ErrorFakeNex(f"SQL de {len(datos):,} bytes: supera el límite del proxy de FakeNex ({C.MAX_SQL_BYTES_FAKENEX:,})")
     esperar_salud()
     t = time.time()
     for intento in range(6):

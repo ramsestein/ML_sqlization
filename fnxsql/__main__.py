@@ -41,7 +41,11 @@ def main(argv=None):
             p.add_argument("--muestra", type=int, default=3, help="nº de pacientes al azar si no se dan (por defecto 3)")
             p.add_argument("--sql", default="auto", choices=["auto", "arrays", "case", "terminos"],
                            help="representación SQL (auto = la más robusta: arrays para árboles y redes)")
-            p.add_argument("--forzar", action="store_true", help="permite representaciones por encima del límite de términos")
+            p.add_argument("--precision", default=C.PRECISION, choices=["float32", "float64", "int8"],
+                           help="parámetros en float32 (por defecto; error <= ~1e-6), float64 (exacto) o int8 (más pequeño; "
+                                "error ~1e-3 a 1e-1 en la probabilidad)")
+            p.add_argument("--forzar", action="store_true",
+                           help="permite superar el límite de términos y el de AWS Athena (hasta el del proxy de FakeNex)")
             p.add_argument("--semilla", type=int, default=C.SEMILLA)
 
     p = sub.add_parser("evaluar", help="circuito completo con validaciones e informe")
@@ -71,6 +75,7 @@ def main(argv=None):
     p.add_argument("--muestra", type=int, default=3)
     p.add_argument("--lotes", default="", help="tamaños de lote para medir tiempos, p. ej. 1,10,50")
     p.add_argument("--sql", default="auto", choices=["auto", "arrays", "case", "terminos"])
+    p.add_argument("--precision", default=C.PRECISION, choices=["float32", "float64", "int8"])
     a = ap.parse_args(argv)
     if a.url:
         C.URL = a.url
@@ -80,7 +85,7 @@ def main(argv=None):
     from . import contrato as K, ir, validar
     if a.orden == "evaluar":
         inf = validar.evaluar(a.modelo, a.contrato, _pacientes(a.pacientes), a.muestra, a.sql, _lotes(a.lotes), a.salida,
-                              a.forzar, a.semilla)
+                              a.forzar, a.semilla, precision=a.precision)
         return 0 if inf.ok else 1
     if a.orden == "nombres":
         obj, tipo = ir.cargar(a.modelo)
@@ -117,7 +122,7 @@ def main(argv=None):
             return 0
         from . import sql as S
         pids = _pacientes(a.pacientes) or validar.pacientes_base(a.muestra, a.semilla)
-        texto, info = S.compilar(doc, pids, a.sql, a.forzar)
+        texto, info = S.compilar(doc, pids, a.sql, a.forzar, a.precision)
         if a.salida:
             Path(a.salida).write_text(texto, encoding="utf-8")
             print(f"{info} -> {a.salida}")
@@ -134,15 +139,17 @@ def main(argv=None):
         filas = []
         for nombre, m in res["modelos"].items():
             inf = validar.evaluar(m["fichero"], None, None, a.muestra, a.sql, _lotes(a.lotes), a.salida,
-                                  solo_pacientes=res["pacientes_test"])
+                                  solo_pacientes=res["pacientes_test"], precision=a.precision)
             sqlinfo = inf.d["datos"].get("sql", {})
             filas.append({"modelo": nombre, "resultado": "PASA" if inf.ok else "FALLA", "auc_test": m["auc_test"],
-                          "sql": sqlinfo.get("tipo_sql"), "kb": round(sqlinfo.get("bytes", 0) / 1024),
+                          "sql": f"{sqlinfo.get('tipo_sql')} {sqlinfo.get('precision', '')}".strip(),
+                          "bytes": sqlinfo.get("bytes", 0),
                           "reloj_s": sqlinfo.get("reloj_s"), "planificacion_s": sqlinfo.get("planificacion_s")})
         resumen = Path(a.salida) / "resumen_demo.md"
-        lineas = ["# Demo fnxsql", "", "| Modelo | Resultado | AUC test | SQL | KB | Reloj (s) | Planificación (s) |",
+        lineas = ["# Demo fnxsql", "", f"Límite de AWS Athena: {C.MAX_SQL_BYTES:,} bytes por consulta.", "",
+                  "| Modelo | Resultado | AUC test | SQL | Bytes | Reloj (s) | Planificación (s) |",
                   "|---|---|---|---|---|---|---|"]
-        lineas += [f"| {f['modelo']} | {f['resultado']} | {f['auc_test']} | {f['sql']} | {f['kb']} | {f['reloj_s']} | "
+        lineas += [f"| {f['modelo']} | {f['resultado']} | {f['auc_test']} | {f['sql']} | {f['bytes']:,} | {f['reloj_s']} | "
                    f"{f['planificacion_s']} |" for f in filas]
         resumen.write_text("\n".join(lineas) + "\n", encoding="utf-8")
         print("\n" + "\n".join(lineas) + f"\n\n-> {resumen}")
