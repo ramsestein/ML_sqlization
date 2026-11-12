@@ -1,0 +1,15 @@
+# salidas de fnxsql (informes, SQL generado, tablas descargadas, modelos de práctica)
+salidas/
+# modelos propios: no subir pesos entrenados con datos reales
+modelos/
+*.joblib
+*.pkl
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/

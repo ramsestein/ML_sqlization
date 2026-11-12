@@ -1,0 +1,9 @@
+# Dependencias de fnxsql (probado con Python 3.11, numpy 2.3, pandas 2.2, scikit-learn 1.9, xgboost 3.1).
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.4   # 1.4+: valores ausentes nativos en árboles y random forest
+joblib>=1.2
+# Opcional: para evaluar modelos XGBoost contra la librería original (sin ella se comparan if-then y SQL).
+xgboost>=2.0
+# Solo para los tests
+pytest>=7

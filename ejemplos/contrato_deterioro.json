@@ -1,0 +1,15 @@
+{
+  "_descripcion": "Ejemplo real: XGBoost de deterioro clínico entrenado fuera (DataNex). Sus nombres se renombran a códigos de DataNex; 'index' no tiene equivalente y vale 0; las ausentes valen 0 como en su script de producción (reindex(...).fillna(0)). El modelo NO se incluye en el repositorio.",
+  "momento_horas": 24,
+  "ventana_horas": 48,
+  "si_falta": 0,
+  "constantes": {"index_last": 0, "index_mean": 0, "index_std": 0, "index_min": 0, "index_max": 0},
+  "renombres": {
+    "P_ART_S": "TAS",
+    "Leucocites": "LAB1300",
+    "Hemoglobin": "LABHBST",
+    "Creatinine": "LAB2467",
+    "K": "LABRPAK",
+    "PCR": "LAB2575"
+  }
+}

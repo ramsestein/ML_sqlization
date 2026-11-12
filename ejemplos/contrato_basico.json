@@ -1,0 +1,8 @@
+{
+  "_descripcion": "Contrato por defecto: evaluación a las 24 h del ingreso (o al alta), ventana de 48 h, ausentes = nulo (el modelo decide).",
+  "momento_horas": 24,
+  "ventana_horas": 48,
+  "si_falta": null,
+  "constantes": {},
+  "renombres": {}
+}
