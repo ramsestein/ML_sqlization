@@ -237,9 +237,6 @@ cabían en Athena. ¹ El KNN no tiene arrays de pesos (su bolsa es la propia bas
 y el "modelo" de un KNN son sus datos de entrenamiento.)
 
 ## Lecciones (medidas durante el desarrollo)
-
-- **Sin bucles.** SQL no tiene bucles; Trino solo admite `WITH RECURSIVE` limitado. Los árboles se recorren con `reduce`
-  sobre un número fijo de pasos (la profundidad).
 - **Trino no materializa los CTE** y funde las proyecciones que se usan una sola vez: 77 árboles en columnas separadas
   acabaron en una única expresión de 230 KB que no compilaba. Usar cada columna dos veces (suma + array) lo evita; los
   arrays lo resuelven de raíz.
