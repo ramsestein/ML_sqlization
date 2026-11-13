@@ -16,6 +16,15 @@ Documento:
       {"tipo": "imputar", "variable": v, "salida": s, "valor": m}        si v es nulo entonces m si no v
       {"tipo": "indicador_nulo", "variable": v, "salida": s}             si v es nulo entonces 1 si no 0
       {"tipo": "estandarizar", "variable": v, "salida": s, "media": m, "escala": e}   (v - m) / e
+      {"tipo": "tabla", "variable": v, "salida": s, "cortes": [c_1 < ... < c_m], "valores": [m + 1],
+       "en_corte": [m] | null, "nulo": n}       función escalonada: nulo -> n; v = c_i (si hay en_corte) -> en_corte[i];
+                                               si no valores[#{c_i <= v}] (un valor igual a un corte va a la derecha)
+      {"tipo": "interpolar", "variable": v, "salida": s, "nodos_x": [x_1 < ... < x_m] (estrictamente crecientes),
+       "nodos_y": [m], "nulo": n}
+                                               lineal a trozos entre nodos, constante fuera (np.interp); nulo -> n
+      {"tipo": "categoria", "variable": v, "salida": s, "valores": {"codigo": valor}, "otro": o, "nulo": n}
+                                               v (código numérico) -> su valor; código no listado -> o; nulo -> n
+      (tabla, interpolar y categoria: funciones de forma de una métrica aprendida, p. ej. PERISIM, ver perisim.py)
    "entrada_nucleo": [nombres],                                          vector que recibe el núcleo
    "nucleo": uno de
       {"tipo": "puntuacion", "base": b, "reglas": [{"si": [cond], "entonces": {"suma": c} | {"suma_por": [var, coef]}}]}
@@ -28,8 +37,10 @@ Documento:
             núcleo lleva "entrada_float32": true, para que el SQL en float32 compare como scikit-learn: float32(x) <= t32)
       {"tipo": "red", "capas": [{"pesos": [[...] por neurona], "sesgos": [...], "activacion": "relu" | "identidad"}]}
             relu: si z > 0 entonces z si no 0; la última capa da el logit; probabilidad = sigmoide
-      {"tipo": "vecinos", "k": k, "ponderacion": "uniforme" | "distancia", "p": 1 | 2, "pesos": [w por entrada] | null,
-       "bolsa": {"etiqueta_sql": sql | null, "solo_pasado": bool, "excluir_mismo_paciente": bool}}
+      {"tipo": "vecinos", "k": k, "ponderacion": "uniforme" | "distancia" | "suavizada", "p": 1 | 2,
+       "pesos": [w por entrada] | null, "alfa": a, "prior": pi | null,                       (alfa / prior: solo suavizada)
+       "bolsa": {"etiqueta_sql": sql | null, "solo_pasado": bool, "excluir_mismo_paciente": bool,
+                 "un_vecino_por_paciente": bool}}
             el "modelo" de un KNN son sus datos: la bolsa NO viaja en el documento, es la propia base (FakeNex / DataNex)
             del hospital donde se ejecuta. distancia = (suma w_j |x_j - y_j|^p)^(1/p) sobre la entrada del núcleo; los
             k ingresos más cercanos (empates por episode_ref) de otros pacientes con etiqueta conocida; probabilidad =
@@ -37,6 +48,9 @@ Documento:
             esos, como scikit-learn). etiqueta_sql: SELECT episode_ref, y (0 / 1) de los ingresos de la bolsa ({esquema}
             y {base} se sustituyen); null = muerte durante el ingreso (alta por exitus). solo_pasado: solo vecinos dados
             de alta antes del momento de evaluación del ingreso consultado (sin información del futuro).
+            suavizada (PERISIM): p = (n_1 + 2 alfa pi) / (n + 2 alfa), n = vecinos encontrados, n_1 los de y = 1, pi =
+            prior o, si es null, la proporción de y = 1 en la bolsa; sin vecinos -> pi. un_vecino_por_paciente: cada
+            paciente de la bolsa cuenta una vez, por su ingreso más cercano (empates por episode_ref).
   cond = {"variable", "op": "es_nulo" | "no_es_nulo" | "<=" | ">" | "==" | "en", "valor"/"valores", "o_nulo"}
 """
 import json
@@ -135,7 +149,7 @@ def a_ir(obj, tipo, variables, contrato, nombre_modelo):
     return doc
 
 
-BOLSA = {"etiqueta_sql": None, "solo_pasado": False, "excluir_mismo_paciente": True}
+BOLSA = {"etiqueta_sql": None, "solo_pasado": False, "excluir_mismo_paciente": True, "un_vecino_por_paciente": False}
 
 
 def bolsa_de(contrato):
@@ -353,9 +367,35 @@ def _preprocesar(doc, fila):
             x[p["salida"]] = p["valor"] if v is None else v
         elif p["tipo"] == "indicador_nulo":
             x[p["salida"]] = 1.0 if v is None else 0.0
+        elif p["tipo"] in FORMAS:
+            x[p["salida"]] = forma(p, v)
         else:
             x[p["salida"]] = None if v is None else (v - p["media"]) / p["escala"]
     return x
+
+
+FORMAS = ("tabla", "interpolar", "categoria")
+
+
+def forma(p, v):
+    """Valor de un paso tabla / interpolar / categoria para v (None = ausente)."""
+    if v is None:
+        return float(p["nulo"])
+    if p["tipo"] == "tabla":
+        c = p["cortes"]
+        if p.get("en_corte") is not None:
+            for ci, e in zip(c, p["en_corte"]):
+                if v == ci:
+                    return float(e)
+        return float(p["valores"][int(np.searchsorted(np.asarray(c, float), v, side="right"))])
+    if p["tipo"] == "interpolar":
+        if np.any(np.diff(p["nodos_x"]) <= 0):
+            raise ValueError("interpolar: nodos_x estrictamente crecientes")
+        return float(np.interp(v, p["nodos_x"], p["nodos_y"]))
+    for cod, val in p["valores"].items():
+        if v == float(cod):
+            return float(val)
+    return float(p["otro"])
 
 
 def entrada(doc, filas):
@@ -443,8 +483,10 @@ def vecinos(doc, Xq, Xb, yb, ids_b=None, pac_q=None, pac_b=None, t_q=None, fin_b
     Sin vecinos admisibles -> NaN. Misma regla que el SQL y que scikit-learn. indices=True: (probabilidades, lista con
     los índices de la bolsa de los vecinos de cada fila)."""
     nuc = doc["nucleo"]
-    bolsa = nuc.get("bolsa", BOLSA)
+    bolsa = {**BOLSA, **nuc.get("bolsa", {})}
     Xq, Xb, yb = np.asarray(Xq, float), np.asarray(Xb, float), np.asarray(yb, float)
+    prior = nuc.get("prior")
+    prior = float(yb.mean()) if prior is None and len(yb) else prior
     s = escala_vecinos(nuc, Xb.shape[1])
     Zq, Zb = Xq * s, Xb * s
     ids_b = np.arange(len(Xb)) if ids_b is None else np.asarray(ids_b)
@@ -458,13 +500,22 @@ def vecinos(doc, Xq, Xb, yb, ids_b=None, pac_q=None, pac_b=None, t_q=None, fin_b
             ok &= np.asarray(fin_b) <= t_q[i]
         idx = np.flatnonzero(ok)
         if not len(idx):
+            if nuc["ponderacion"] == "suavizada":
+                out[i] = prior
             continue
         dif = Zb[idx] - Zq[i]
         d = np.sqrt((dif * dif).sum(1)) if nuc["p"] == 2 else np.abs(dif).sum(1)
-        orden = np.lexsort((ids_b[idx], d))[: nuc["k"]]
+        orden = np.lexsort((ids_b[idx], d))
+        if bolsa["un_vecino_por_paciente"]:  # el ingreso más cercano de cada paciente (el primero en el orden)
+            _, primero = np.unique(np.asarray(pac_b)[idx][orden], return_index=True)
+            orden = orden[np.sort(primero)]
+        orden = orden[: nuc["k"]]
         dk, yk = d[orden], yb[idx][orden]
         elegidos[i] = idx[orden]
-        if nuc["ponderacion"] == "uniforme":
+        if nuc["ponderacion"] == "suavizada":
+            a = float(nuc["alfa"])
+            out[i] = (yk.sum() + 2 * a * prior) / (len(yk) + 2 * a)
+        elif nuc["ponderacion"] == "uniforme":
             out[i] = yk.mean()
         elif (dk == 0).any():
             out[i] = yk[dk == 0].mean()

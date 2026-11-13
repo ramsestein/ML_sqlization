@@ -296,12 +296,32 @@ float32: el SQL hace las mismas cuentas en real que el modelo.
   redondearlos al float32 más cercano, 9 recorridos de 620 ingresos cambiaban de rama (5·10⁻⁴ en la probabilidad).
   Redondeando hacia fuera según la comparación: 0.
 
+### KNN de una métrica aprendida (PERISIM)
+
+Una métrica de PERISIM (pesos NCA diagonales sobre funciones de forma por variable) se exporta en PERISIM
+(`src/deploy/fnxsql_export.py`, formato `perisim_fnxsql_v1`: solo agregados) y `fnxsql.perisim.documento` la convierte en
+un documento con:
+
+- pasos de preproceso nuevos, uno por dimensión de la métrica: `tabla` (función escalonada sobre los cortes de los bins;
+  opcionalmente con valor propio en cada corte), `interpolar` (lineal a trozos entre nodos estrictamente crecientes,
+  constante fuera: la colocación por longitud de arco) y `categoria` (código numérico → valor; otro; nulo). En SQL, un
+  `CASE` cada uno;
+- núcleo `vecinos` con `ponderacion: "suavizada"`: p = (n₁ + 2α·π) / (n + 2α), con π la proporción de y = 1 en la bolsa
+  (o `prior` del documento) y π si no hay vecinos;
+- bolsa con `un_vecino_por_paciente`: cada paciente cuenta una vez, por su ingreso más cercano (SQL: `row_number()`
+  por consulta y paciente antes del top-k).
+
+Tests: el SQL de los pasos = el intérprete (en DuckDB) y el KNN suavizado con un vecino por paciente = una referencia
+por fuerza bruta; en PERISIM (`tests/test_deploy_fnxsql.py`), los pasos reproducen el embedding de PERISIM y el KNN de
+fnxsql da las predicciones del caso-base de PERISIM (salvo cuasi-empates: PERISIM busca en float32).
+
 ## Estructura
 
 ```
 fnxsql/
   contrato.py   gramática de nombres, SQL de variables (servidor) y cálculo local con pandas (validación)
   ir.py         carga de modelos, documento if-then exacto e intérprete
+  perisim.py    documento de una métrica PERISIM exportada (pasos de forma + KNN suavizado)
   sql.py        compilador if-then -> SQL (terminos / case / arrays) con salvaguardas
   binario.py    precisión (float64 / float32 / int8): cuantización del documento, arrays base64, árboles en anchura
   cliente.py    API REST de Trino con controles de salud y límites

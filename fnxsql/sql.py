@@ -65,9 +65,32 @@ def _expresiones(doc):
             ex[p["salida"]] = f"coalesce({e}, {lit(p['valor'])})"
         elif p["tipo"] == "indicador_nulo":
             ex[p["salida"]] = f"(CASE WHEN {e} IS NULL THEN 1E0 ELSE 0E0 END)"
+        elif p["tipo"] in ir.FORMAS:
+            ex[p["salida"]] = _forma(p, e)
         else:
             ex[p["salida"]] = f"(({e} - {lit(p['media'])}) / {lit(p['escala'])})"
     return ex
+
+
+def _forma(p, e):
+    """CASE de un paso tabla / interpolar / categoria (misma regla que ir.forma)."""
+    ramas = [f"WHEN {e} IS NULL THEN {lit(p['nulo'])}"]
+    if p["tipo"] == "tabla":
+        c, v = p["cortes"], p["valores"]
+        if p.get("en_corte") is not None:
+            ramas += [f"WHEN {e} = {lit(ci)} THEN {lit(x)}" for ci, x in zip(c, p["en_corte"])]
+        ramas += [f"WHEN {e} < {lit(ci)} THEN {lit(x)}" for ci, x in zip(c, v[:-1])]
+        return "(CASE " + " ".join(ramas) + f" ELSE {lit(v[-1])} END)"
+    if p["tipo"] == "interpolar":
+        X, Y = p["nodos_x"], p["nodos_y"]
+        if np.any(np.diff(X) <= 0):
+            raise ValueError("interpolar: nodos_x estrictamente crecientes")
+        ramas.append(f"WHEN {e} <= {lit(X[0])} THEN {lit(Y[0])}")
+        for x0, x1, y0, y1 in zip(X[:-1], X[1:], Y[:-1], Y[1:]):
+            ramas.append(f"WHEN {e} <= {lit(x1)} THEN {lit(y0)} + ({e} - {lit(x0)}) * ({lit(y1)} - {lit(y0)}) / ({lit(x1)} - {lit(x0)})")  # np.interp
+        return "(CASE " + " ".join(ramas) + f" ELSE {lit(Y[-1])} END)"
+    ramas += [f"WHEN {e} = {lit(float(cod))} THEN {lit(val)}" for cod, val in p["valores"].items()]
+    return "(CASE " + " ".join(ramas) + f" ELSE {lit(p['otro'])} END)"
 
 
 def compilar(doc, pids, tipo="auto", forzar=False, precision=None):
@@ -294,11 +317,17 @@ def _vecinos(doc, ex, variables, contrato, pids):
         dist = "sqrt(reduce(zip_with(c.x, b.x, (u, w) -> (u - w) * (u - w)), 0E0, (s, t) -> s + t, s -> s))"
     else:
         dist = "reduce(zip_with(c.x, b.x, (u, w) -> abs(u - w)), 0E0, (s, t) -> s + t, s -> s)"
-    if nuc["ponderacion"] == "uniforme":
+    suav = nuc["ponderacion"] == "suavizada"
+    if suav:  # PERISIM: (n_1 + 2 alfa pi) / (n + 2 alfa); pi del documento o la proporción de y = 1 en la bolsa
+        a = lit(float(nuc["alfa"]))
+        prob = f"(sum(y) + 2E0 * {a} * max(pi)) / (count(*) + 2E0 * {a})"
+    elif nuc["ponderacion"] == "uniforme":
         prob = "avg(y)"
     else:  # regla de scikit-learn con weights="distance": vecinos a distancia 0 -> media de esos
         prob = "CASE WHEN min(dist) = 0E0 THEN avg(y) FILTER (WHERE dist = 0E0) ELSE sum(y / dist) / sum(1E0 / dist) END"
     sub = sql_variables(variables, contrato, pids)
+    unico = bolsa.get("un_vecino_por_paciente", False)
+    pi = (f"(SELECT avg(y) FROM bolsa)" if nuc.get("prior") is None else lit(float(nuc["prior"])))
     cuerpo = (
         f"etiqueta AS (  -- desenlace de cada ingreso de la bolsa (solo entran los que lo tienen)\n  {sql_etiqueta_bolsa(bolsa)}\n),\n"
         "bolsa AS (  -- la base del hospital: un array por ingreso con la entrada del núcleo\n"
@@ -310,15 +339,22 @@ def _vecinos(doc, ex, variables, contrato, pids):
         + sub + "\nSELECT * FROM vars\n),\n"
         "consulta AS (\n  SELECT patient_ref, episode_ref, t0, t_eval,\n         "
         + arr + " AS x\n  FROM consulta_vars\n),\n"
-        "distancias AS (\n  SELECT c.episode_ref, b.episode_ref AS vecino, b.y,\n         " + dist + " AS dist\n"
+        "distancias AS (\n  SELECT c.episode_ref, b.episode_ref AS vecino, b.patient_ref AS paciente_vecino, b.y,\n         "
+        + dist + " AS dist\n"
         "  FROM consulta c JOIN bolsa b ON " + (" AND ".join(cond) or "TRUE") + "\n),\n"
-        "vecinos AS (\n  SELECT * FROM (SELECT d.*, row_number() OVER (PARTITION BY episode_ref ORDER BY dist, vecino) AS rk "
-        f"FROM distancias d)\n  WHERE rk <= {nuc['k']}\n),\n"
-        f"agregado AS (\n  SELECT episode_ref, {prob} AS probabilidad, count(*) AS n_vecinos, max(dist) AS distancia_k\n"
-        "  FROM vecinos GROUP BY episode_ref\n),\n"
-        "nucleo AS (\n  SELECT c.patient_ref, c.episode_ref, c.t0, c.t_eval, a.probabilidad, a.n_vecinos, a.distancia_k\n"
+        + ("unicos AS (  -- un vecino por paciente: su ingreso más cercano\n  SELECT episode_ref, vecino, y, dist FROM (SELECT d.*, "
+           "row_number() OVER (PARTITION BY episode_ref, paciente_vecino ORDER BY dist, vecino) AS rp FROM distancias d)\n"
+           "  WHERE rp = 1\n),\n" if unico else "")
+        + "vecinos AS (\n  SELECT * FROM (SELECT d.*, row_number() OVER (PARTITION BY episode_ref ORDER BY dist, vecino) AS rk "
+        f"FROM {'unicos' if unico else 'distancias'} d)\n  WHERE rk <= {nuc['k']}\n),\n"
+        + ("prior AS (SELECT " + pi + " AS pi),\n" if suav else "")
+        + f"agregado AS (\n  SELECT episode_ref, {prob} AS probabilidad, count(*) AS n_vecinos, max(dist) AS distancia_k\n"
+        + ("  FROM vecinos CROSS JOIN prior GROUP BY episode_ref\n),\n" if suav else "  FROM vecinos GROUP BY episode_ref\n),\n")
+        + "nucleo AS (\n  SELECT c.patient_ref, c.episode_ref, c.t0, c.t_eval, "
+        + ("coalesce(a.probabilidad, (SELECT pi FROM prior))" if suav else "a.probabilidad")
+        + " AS probabilidad, a.n_vecinos, a.distancia_k\n"
         "  FROM consulta c LEFT JOIN agregado a ON a.episode_ref = c.episode_ref\n)\n"
         "SELECT patient_ref, episode_ref, t0 AS ingreso, t_eval AS momento, probabilidad, n_vecinos, distancia_k\n"
         "FROM nucleo\nORDER BY patient_ref, ingreso")
     return cuerpo, {"k": nuc["k"], "dimensiones": len(ent), "ponderacion": nuc["ponderacion"], "p": nuc["p"],
-                    "ponderada": nuc.get("pesos") is not None, "solo_pasado": bool(fin)}
+                    "ponderada": nuc.get("pesos") is not None, "solo_pasado": bool(fin), "un_vecino_por_paciente": unico}
