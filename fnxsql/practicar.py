@@ -24,6 +24,7 @@ def modelos():
     from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
+    from sklearn.neighbors import KNeighborsClassifier
     from sklearn.neural_network import MLPClassifier
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
@@ -39,7 +40,9 @@ def modelos():
          "boosting": (lambda: HistGradientBoostingClassifier(learning_rate=0.05, max_iter=200, max_leaf_nodes=15,
                                                              random_state=S), "joblib"),
          "red_pequena": (lambda: red((8,)), "joblib"), "red_mediana": (lambda: red((32,)), "joblib"),
-         "red_grande": (lambda: red((128, 64)), "joblib")}
+         "red_grande": (lambda: red((128, 64)), "joblib"),
+         # KNN: lo que viaja es la geometría (preproceso, k, pesos); la bolsa al evaluar es la propia base de FakeNex
+         "knn": (lambda: Pipeline(prep() + [("knn", KNeighborsClassifier(n_neighbors=150, weights="distance"))]), "joblib")}
     try:
         import xgboost as xgb
         m["xgboost"] = (lambda: xgb.XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05, random_state=S,

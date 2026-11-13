@@ -3,7 +3,8 @@
 Modelos admitidos (clasificación binaria, probabilidad de la clase 1):
   XGBoost        .json nativo (save_model): gbtree, binary:logistic, cortes numéricos. Sin necesidad de xgboost instalado.
   scikit-learn   .joblib / .pkl con LogisticRegression, DecisionTreeClassifier, RandomForestClassifier,
-                 HistGradientBoostingClassifier (sin variables categóricas) o MLPClassifier (ReLU), solos o en un Pipeline
+                 HistGradientBoostingClassifier (sin variables categóricas), MLPClassifier (ReLU) o KNeighborsClassifier
+                 (euclídea / manhattan / minkowski p = 1 o 2, con pesos w opcionales), solos o en un Pipeline
                  precedidos de SimpleImputer y/o StandardScaler. ¡joblib/pickle ejecuta código al cargar: solo ficheros
                  de confianza!
 Las variables del modelo deben llamarse con la gramática del contrato (contrato.py): son las entradas del documento.
@@ -27,6 +28,15 @@ Documento:
             núcleo lleva "entrada_float32": true, para que el SQL en float32 compare como scikit-learn: float32(x) <= t32)
       {"tipo": "red", "capas": [{"pesos": [[...] por neurona], "sesgos": [...], "activacion": "relu" | "identidad"}]}
             relu: si z > 0 entonces z si no 0; la última capa da el logit; probabilidad = sigmoide
+      {"tipo": "vecinos", "k": k, "ponderacion": "uniforme" | "distancia", "p": 1 | 2, "pesos": [w por entrada] | null,
+       "bolsa": {"etiqueta_sql": sql | null, "solo_pasado": bool, "excluir_mismo_paciente": bool}}
+            el "modelo" de un KNN son sus datos: la bolsa NO viaja en el documento, es la propia base (FakeNex / DataNex)
+            del hospital donde se ejecuta. distancia = (suma w_j |x_j - y_j|^p)^(1/p) sobre la entrada del núcleo; los
+            k ingresos más cercanos (empates por episode_ref) de otros pacientes con etiqueta conocida; probabilidad =
+            proporción de y = 1 (uniforme) o media ponderada por 1 / distancia (si hay vecinos a distancia 0, la media de
+            esos, como scikit-learn). etiqueta_sql: SELECT episode_ref, y (0 / 1) de los ingresos de la bolsa ({esquema}
+            y {base} se sustituyen); null = muerte durante el ingreso (alta por exitus). solo_pasado: solo vecinos dados
+            de alta antes del momento de evaluación del ingreso consultado (sin información del futuro).
   cond = {"variable", "op": "es_nulo" | "no_es_nulo" | "<=" | ">" | "==" | "en", "valor"/"valores", "o_nulo"}
 """
 import json
@@ -117,7 +127,26 @@ def a_ir(obj, tipo, variables, contrato, nombre_modelo):
     doc["modelo"]["clase"] = type(est).__name__
     doc["entrada_nucleo"] = actuales
     doc["nucleo"] = _nucleo_sklearn(est)
+    if doc["nucleo"]["tipo"] == "vecinos":
+        doc["nucleo"]["bolsa"] = bolsa_de(contrato)
+        if contrato.si_falta is None and not any(p["tipo"] == "imputar" for p in doc["preproceso"]):
+            raise ValueError("KNN sin SimpleImputer y con si_falta = null: un ausente daría distancias nulas "
+                             "(pon un SimpleImputer en el Pipeline o un si_falta numérico en el contrato)")
     return doc
+
+
+BOLSA = {"etiqueta_sql": None, "solo_pasado": False, "excluir_mismo_paciente": True}
+
+
+def bolsa_de(contrato):
+    """Definición de la bolsa de un KNN: la del contrato ("bolsa": {...}) sobre los valores por defecto."""
+    d = dict(BOLSA)
+    extra = getattr(contrato, "bolsa", None) or {}
+    desconocidas = set(extra) - set(BOLSA)
+    if desconocidas:
+        raise ValueError(f"claves de 'bolsa' no reconocidas: {sorted(desconocidas)} (admitidas: {sorted(BOLSA)})")
+    d.update(extra)
+    return d
 
 
 def _preproceso(p, entrada, pasos):
@@ -176,6 +205,7 @@ def _xgboost(d):
 def _nucleo_sklearn(est):
     from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
     from sklearn.linear_model import LogisticRegression
+    from sklearn.neighbors import KNeighborsClassifier
     from sklearn.neural_network import MLPClassifier
     from sklearn.tree import DecisionTreeClassifier
     if list(est.classes_) != [0, 1] and len(est.classes_) != 2:
@@ -223,7 +253,33 @@ def _nucleo_sklearn(est):
         W, b = est.coefs_[-1], est.intercepts_[-1]
         capas.append({"pesos": [[float(x) for x in W[:, 0]]], "sesgos": [float(b[0])], "activacion": "identidad"})
         return {"tipo": "red", "capas": capas}
+    if isinstance(est, KNeighborsClassifier):
+        return _knn(est)
     raise ValueError(f"modelo no admitido: {type(est).__name__}")
+
+
+def _knn(est):
+    if est.weights not in ("uniform", "distance"):
+        raise ValueError(f"KNeighborsClassifier(weights={est.weights!r}) no admitido (solo 'uniform' o 'distance')")
+    met = est.effective_metric_
+    par = dict(est.effective_metric_params_ or {})
+    w = par.pop("w", None)
+    if met == "euclidean":
+        p = 2
+    elif met == "manhattan":
+        p = 1
+    elif met == "minkowski":
+        p = par.pop("p", est.p)
+    else:
+        raise ValueError(f"métrica {met!r} no admitida (euclidean, manhattan o minkowski con p = 1 o 2)")
+    if p not in (1, 2) or par:
+        raise ValueError(f"métrica minkowski con p = {p} y parámetros {par} no admitida (p = 1 o 2, pesos w opcionales)")
+    if w is not None:
+        w = [float(x) for x in np.ravel(w)]
+        if len(w) != est.n_features_in_ or min(w) < 0:
+            raise ValueError("pesos w del KNN: uno por variable de entrada y no negativos")
+    return {"tipo": "vecinos", "k": int(est.n_neighbors), "ponderacion": {"uniform": "uniforme", "distance": "distancia"}[est.weights],
+            "p": int(p), "pesos": w}
 
 
 def _arbol_sklearn(t_, k1):
@@ -278,6 +334,9 @@ def resumen(doc):
     if nuc["tipo"] == "red":
         return {"tipo": "red", "capas": [len(c["sesgos"]) for c in nuc["capas"]],
                 "pesos": sum(len(p) for c in nuc["capas"] for p in c["pesos"])}
+    if nuc["tipo"] == "vecinos":
+        return {"tipo": "vecinos", "k": nuc["k"], "ponderacion": nuc["ponderacion"], "p": nuc["p"],
+                "ponderada": nuc["pesos"] is not None, "dimensiones": len(doc["entrada_nucleo"]), **nuc["bolsa"]}
     return {"tipo": "puntuacion", "reglas": len(nuc["reglas"])}
 
 
@@ -286,8 +345,7 @@ def _nulo(x):
     return x is None or (isinstance(x, float) and math.isnan(x))
 
 
-def evaluar(doc, fila):
-    """Probabilidad según el documento, a partir de un dict nombre de variable -> valor (None / NaN = ausente)."""
+def _preprocesar(doc, fila):
     x = {v["nombre"]: (None if _nulo(fila.get(v["nombre"])) else float(fila[v["nombre"]])) for v in doc["variables"]}
     for p in doc["preproceso"]:
         v = x[p["variable"]]
@@ -297,7 +355,23 @@ def evaluar(doc, fila):
             x[p["salida"]] = 1.0 if v is None else 0.0
         else:
             x[p["salida"]] = None if v is None else (v - p["media"]) / p["escala"]
+    return x
+
+
+def entrada(doc, filas):
+    """Matriz (n x d) de la entrada del núcleo (tras el preproceso del documento) para una lista de dicts de variables;
+    ausentes sin imputar = NaN."""
+    ent = doc["entrada_nucleo"]
+    return np.array([[np.nan if (z := _preprocesar(doc, f)[n]) is None else z for n in ent] for f in filas], dtype=float).reshape(-1, len(ent))
+
+
+def evaluar(doc, fila):
+    """Probabilidad según el documento, a partir de un dict nombre de variable -> valor (None / NaN = ausente).
+    Un núcleo "vecinos" necesita su bolsa: usa vecinos()."""
+    x = _preprocesar(doc, fila)
     nuc = doc["nucleo"]
+    if nuc["tipo"] == "vecinos":
+        raise ValueError("un KNN no se evalúa fila a fila: necesita su bolsa (ir.vecinos)")
     if nuc["tipo"] == "puntuacion":
         z = nuc["base"]
         for r in nuc["reglas"]:
@@ -351,3 +425,56 @@ def _cumple(c, x):
         return bool(c.get("o_nulo", False))
     return {"<=": lambda: v <= c["valor"], ">": lambda: v > c["valor"], "==": lambda: v == c["valor"],
             "en": lambda: v in c["valores"]}[op]()
+
+
+def escala_vecinos(nuc, d):
+    """Factor por dimensión que el SQL aplica a cada coordenada: sqrt(w) con p = 2 y w con p = 1 (así la distancia
+    ponderada es la distancia ordinaria entre vectores escalados); 1 sin pesos."""
+    if nuc.get("pesos") is None:
+        return np.ones(d)
+    w = np.asarray(nuc["pesos"], dtype=float)
+    return np.sqrt(w) if nuc["p"] == 2 else w
+
+
+def vecinos(doc, Xq, Xb, yb, ids_b=None, pac_q=None, pac_b=None, t_q=None, fin_b=None, indices=False):
+    """Probabilidad del KNN del documento para cada fila de Xq (entrada del núcleo, ver entrada()) con la bolsa Xb / yb.
+    ids_b: desempate (episode_ref; por defecto el orden de la bolsa). pac_q / pac_b: patient_ref (excluye los vecinos del
+    mismo paciente si la bolsa lo pide). t_q / fin_b: momento de evaluación de la consulta y alta del vecino (solo_pasado).
+    Sin vecinos admisibles -> NaN. Misma regla que el SQL y que scikit-learn. indices=True: (probabilidades, lista con
+    los índices de la bolsa de los vecinos de cada fila)."""
+    nuc = doc["nucleo"]
+    bolsa = nuc.get("bolsa", BOLSA)
+    Xq, Xb, yb = np.asarray(Xq, float), np.asarray(Xb, float), np.asarray(yb, float)
+    s = escala_vecinos(nuc, Xb.shape[1])
+    Zq, Zb = Xq * s, Xb * s
+    ids_b = np.arange(len(Xb)) if ids_b is None else np.asarray(ids_b)
+    out = np.full(len(Xq), np.nan)
+    elegidos = [np.array([], int)] * len(Xq)
+    for i in range(len(Xq)):
+        ok = np.ones(len(Xb), bool)
+        if pac_q is not None and bolsa.get("excluir_mismo_paciente", True):
+            ok &= np.asarray(pac_b) != pac_q[i]
+        if t_q is not None and bolsa.get("solo_pasado"):
+            ok &= np.asarray(fin_b) <= t_q[i]
+        idx = np.flatnonzero(ok)
+        if not len(idx):
+            continue
+        dif = Zb[idx] - Zq[i]
+        d = np.sqrt((dif * dif).sum(1)) if nuc["p"] == 2 else np.abs(dif).sum(1)
+        orden = np.lexsort((ids_b[idx], d))[: nuc["k"]]
+        dk, yk = d[orden], yb[idx][orden]
+        elegidos[i] = idx[orden]
+        if nuc["ponderacion"] == "uniforme":
+            out[i] = yk.mean()
+        elif (dk == 0).any():
+            out[i] = yk[dk == 0].mean()
+        else:
+            out[i] = (yk / dk).sum() / (1 / dk).sum()
+    return (out, elegidos) if indices else out
+
+
+def bolsa_entrenamiento(obj):
+    """(Xb, yb) del KNN ajustado, en el espacio de la entrada del núcleo (para comprobar el documento frente al modelo)."""
+    from sklearn.pipeline import Pipeline
+    est = obj.steps[-1][1] if isinstance(obj, Pipeline) else obj
+    return np.asarray(est._fit_X, float), (np.asarray(est._y) == 1).astype(float)

@@ -37,3 +37,8 @@ SEMILLA = 42
 TOLERANCIA_DOUBLE = 1e-9    # modelos que trabajan en double (scikit-learn)
 TOLERANCIA_FLOAT32 = 1e-6   # XGBoost compara y suma en float32 (con cualquier precisión: ya es float32)
 TOLERANCIA_PARAMETROS_FLOAT32 = 1e-5  # modelos en double con los parámetros redondeados a float32 (--precision float32)
+# KNN frente a scikit-learn: con algorithm="brute" calcula la euclídea como |x|² + |y|² - 2 x·y, con errores de hasta
+# ~3e-7 en las distancias (un ingreso que está en la bolsa le sale a ~1e-7 de sí mismo, no a 0); con 1 / distancia eso
+# llega a ~4e-6 en la probabilidad (medido con el KNN de práctica). El if-then y el SQL restan coordenada a coordenada.
+# Los vecinos elegidos se comprueban aparte; SQL = if-then sobre la misma bolsa sigue con TOLERANCIA_DOUBLE.
+TOLERANCIA_KNN_SKLEARN = 1e-5

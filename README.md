@@ -95,10 +95,12 @@ rellena (como hace muchas veces el código de producción). `renombres` solo lo 
 | `DecisionTreeClassifier`, `RandomForestClassifier` | árboles if-then | `arrays`, `case` |
 | `HistGradientBoostingClassifier` (sin categóricas) | árboles if-then | `arrays`, `case` |
 | `MLPClassifier` (ReLU) | capas densas; ReLU = si z > 0 entonces z si no 0 | `arrays`, `terminos` |
+| `KNeighborsClassifier` (euclídea, manhattan o minkowski p = 1 / 2 con pesos `w`) | núcleo `vecinos`: preproceso, k, ponderación y pesos; **la bolsa es la propia base** | `arrays` (float64) |
 
 Cualquiera de los de scikit-learn puede ir en un `Pipeline` con `SimpleImputer` y / o `StandardScaler` delante: se
-traducen como reglas de preproceso. **No admitidos**: KNN (su "modelo" son los datos de entrenamiento), multiclase,
-regresión, variables categóricas de HistGradientBoosting o XGBoost, LightGBM.
+traducen como reglas de preproceso (el KNN necesita un `SimpleImputer` o un `si_falta` numérico: un ausente daría
+distancias nulas). **No admitidos**: KNN con su bolsa de entrenamiento incrustada (ver abajo), multiclase, regresión,
+variables categóricas de HistGradientBoosting o XGBoost, LightGBM.
 
 Por qué así (medido en FakeNex, ver «Lecciones»):
 
@@ -107,6 +109,44 @@ Por qué así (medido en FakeNex, ver «Lecciones»):
   `reduce(sequence(1, profundidad), raíz, ...)` / `zip_with`. Sin bucles y con pocos tokens: ~1-2 s de planificación.
 - **case** / **terminos**: cada nodo o peso es una expresión. Legible, pero el coste de planificar crece con el modelo:
   `fnxsql` se niega por encima de 12.000 términos (`--forzar` para saltárselo).
+
+### KNN: la bolsa es la base
+
+El "modelo" de un KNN son sus datos de entrenamiento, y no se incrustan en la consulta: no cabrían en Athena (con 195
+variables en float32, menos de 250 casos) y son datos de pacientes que no deben viajar. Lo que viaja es **la geometría**
+(preproceso, k, ponderación, métrica y pesos por variable); los vecinos se buscan en la base del hospital donde se
+ejecuta (en FakeNex, la base original, `patient_ref < 1000000000`). Es la conversión del experimento
+(`experimento_fakenex/mortalidad/knn_a_sql.py`, variante «vector», verificada en 620 ingresos con 1,7·10⁻¹⁶ frente a
+scikit-learn sobre la misma bolsa), ahora con el contrato y el `sql_variables` del paquete.
+
+Una sola pasada, exacta y sin bucles: `vars` de toda la base (la bolsa) y, en un WITH anidado, las de los pacientes
+consultados → un array por ingreso → distancia a cada ingreso de la bolsa de **otros** pacientes con desenlace conocido
+(`zip_with` + `reduce`) → `row_number() OVER (PARTITION BY ingreso ORDER BY distancia, vecino) <= k` (empates por
+`episode_ref`: determinista) → media o media ponderada por 1 / distancia (con la regla de scikit-learn para distancia 0).
+Con pesos `w` (p. ej. una NCA diagonal o pesos de importancia), cada coordenada se multiplica por √w (p = 2) o w (p = 1).
+Se queda en float64: no hay arrays de parámetros que encoger y redondear el preproceso podría cambiar qué vecinos entran.
+
+La bolsa se define en el contrato (todo opcional):
+
+```json
+{"bolsa": {"etiqueta_sql": "SELECT episode_ref, y FROM {esquema}.mi_tabla WHERE patient_ref {base}",
+           "solo_pasado": true,
+           "excluir_mismo_paciente": true}}
+```
+
+- `etiqueta_sql`: desenlace (0 / 1) de los ingresos de la bolsa; por defecto, muerte durante el ingreso (alta por
+  exitus, `adm_disch.mot_ref = 23`). Solo entran en la bolsa los ingresos que devuelve (sin desenlace no hay vecino).
+- `solo_pasado` (por defecto `false`, como el experimento): solo vecinos dados de alta antes del momento de evaluación
+  del ingreso consultado. En un análisis retrospectivo, sin él un vecino puede ser un ingreso posterior; en producción
+  ese futuro no existe, así que es la opción que reproduce el uso real.
+- `excluir_mismo_paciente` (por defecto `true`): los ingresos del propio paciente no son vecinos.
+
+Validación (`evaluar`): el if-then con la bolsa de entrenamiento del modelo = scikit-learn (filas sintéticas e ingresos
+reales, mismos vecinos; tolerancia 10⁻⁵ porque scikit-learn, con `algorithm="brute"`, calcula la euclídea como
+‖x‖² + ‖y‖² − 2x·y y mete hasta ~3·10⁻⁷ en las distancias), y el SQL = if-then sobre la bolsa de FakeNex descargada
+(tolerancia 10⁻⁹). La diferencia entre el SQL y el modelo con su bolsa de entrenamiento se informa como aviso: no es un
+error de la conversión, es el cambio de bolsa (lo que mide la transportabilidad). El coste crece con ingresos
+consultados × bolsa (experimento: 250 pacientes en 44,5 s, < 130 MB).
 
 ### Precisión y límite de AWS Athena
 
@@ -236,10 +276,10 @@ pacientes de FakeNex). Reloj (servidor):
 
 Pesos y diferencias de las versiones float32; tiempos de la medición anterior (float64), que en float32 son parecidos.
 Con JSON en double, el random forest (399 KB), el PCA + boosting (515), la red 128+64 (461) y el XGBoost real (347) no
-cabían en Athena. ¹ El KNN no tiene arrays de pesos (su bolsa es la propia base) y se queda en float64. ² XGBoost ya es
+cabían en Athena. ¹ El KNN no tiene arrays de pesos (su bolsa es la propia base) y se queda en float64; desde 0.3.0
+está en `fnxsql` (núcleo `vecinos`). ² XGBoost ya es
 float32: el SQL hace las mismas cuentas en real que el modelo.
-(PCA + boosting y KNN se probaron en el experimento pero no están en `fnxsql`: el PCA no es un paso de Pipeline admitido
-y el "modelo" de un KNN son sus datos de entrenamiento.)
+(PCA + boosting se probó en el experimento pero no está en `fnxsql`: el PCA no es un paso de Pipeline admitido.)
 
 ## Lecciones (medidas durante el desarrollo)
 - **Trino no materializa los CTE** y funde las proyecciones que se usan una sola vez: 77 árboles en columnas separadas

@@ -9,6 +9,9 @@ Pasos (cada comprobación queda en el informe como PASA / FALLA / AVISO; el proc
   6. predicción: SQL = if-then cuantizado a la precisión elegida (binario.cuantizar) y error de esa precisión frente al
      modelo original (float64 / float32: con tolerancia; int8: aviso con el error medido)
   7. tiempos: opcionalmente, lotes de varios tamaños (solo medida)
+KNN (núcleo vecinos): en 3 el if-then usa la bolsa de entrenamiento del modelo (debe dar lo mismo que scikit-learn); en
+6 el SQL se compara con el if-then sobre la bolsa de FakeNex descargada (la misma que usa el SQL), y la diferencia con
+el modelo original (otra bolsa) se informa como aviso: no es un error, es el cambio de bolsa.
 """
 import json
 import random
@@ -120,13 +123,24 @@ def _evaluar(inf, ruta_modelo, ruta_contrato, pacientes, muestra, tipo, lotes, c
     tol = C.TOLERANCIA_FLOAT32 if doc["nucleo"].get("precision") == "float32" else C.TOLERANCIA_DOUBLE  # if-then: exacto
     # El SQL calcula el documento cuantizado (binario.cuantizar): se compara con él (exacto) y, aparte, se mide el error
     # que añade la precisión frente al modelo original (float32: con tolerancia; int8: se informa, es una pérdida aceptada)
+    knn = doc["nucleo"]["tipo"] == "vecinos"
+    if knn and precision != "float64":
+        inf.aviso(f"KNN: se queda en float64 (pedido {precision}); no tiene arrays de parámetros que encoger y redondear "
+                  "el preproceso podría cambiar qué vecinos entran")
+        precision = "float64"
     dq = B.cuantizar(doc, precision)
     f32n = doc["nucleo"].get("precision") == "float32"
     tol_prec = {"float64": tol, "float32": tol if f32n else C.TOLERANCIA_PARAMETROS_FLOAT32, "int8": None}[precision]
     try:
         X = sinteticas(variables, 300, semilla, con_ausentes=contrato.si_falta is None)
-        d = np.abs(np.array([ir.evaluar(doc, r) for r in X.to_dict("records")]) - ir.predecir_nativo(obj, origen, X)).max()
-        inf.check("if-then = modelo original (300 filas sintéticas)", d <= tol, f"diferencia máxima {d:.1e} (tolerancia {tol:.0e})")
+        if knn:
+            p_ir = ir.vecinos(doc, ir.entrada(doc, X.to_dict("records")), *ir.bolsa_entrenamiento(obj))
+            texto, tol_m = "if-then con la bolsa de entrenamiento = modelo original (300 filas sintéticas)", C.TOLERANCIA_KNN_SKLEARN
+        else:
+            p_ir = np.array([ir.evaluar(doc, r) for r in X.to_dict("records")])
+            texto, tol_m = "if-then = modelo original (300 filas sintéticas)", tol
+        d = np.abs(p_ir - ir.predecir_nativo(obj, origen, X)).max()
+        inf.check(texto, d <= tol_m, f"diferencia máxima {d:.1e} (tolerancia {tol_m:.0e})")
         nativo = True
     except ImportError as e:
         inf.aviso(f"no se puede ejecutar el modelo original ({e}); se comparan if-then y SQL")
@@ -152,6 +166,22 @@ def _evaluar(inf, ruta_modelo, ruta_contrato, pacientes, muestra, tipo, lotes, c
     con_datos = sorted({v.nombre for v in variables if v.fuente != "constante" and b[v.nombre].notna().any()
                         and (b[v.nombre] != (contrato.si_falta if contrato.si_falta is not None else np.nan)).any()})
     inf.d["datos"]["variables"] = {"con_datos_en_estos_ingresos": len(con_datos), "total": len(variables), "filas_descargadas": filas}
+    if knn:
+        _prediccion_vecinos(inf, obj, origen, doc, dq, nombres, vsrv, srv, precision, tol, tol_prec, nativo, carpeta)
+    else:
+        _prediccion(inf, obj, origen, doc, dq, nombres, b, srv, precision, tol, tol_prec, nativo, carpeta)
+    tiempos = []
+    for n in lotes:
+        ps = pacientes_base(n, semilla + 1, solo=solo_pacientes)
+        sq, _ = S.compilar(doc, ps, tipo, forzar, precision)
+        df, rl, stn = cliente.ejecutar(sq)
+        tiempos.append({"pacientes": len(ps), "ingresos": len(df), **cliente.resumen_stats(stn, rl)})
+        print(f"  lote {len(ps)}: {tiempos[-1]}", flush=True)
+    if tiempos:
+        inf.d["datos"]["tiempos"] = tiempos
+
+
+def _prediccion(inf, obj, origen, doc, dq, nombres, b, srv, precision, tol, tol_prec, nativo, carpeta):
     filas_b = b[nombres].to_dict("records")
     p_ir = np.array([ir.evaluar(doc, r) for r in filas_b])
     res = pd.DataFrame({"episode_ref": b.index, "p_ifthen": p_ir, "p_ifthen_" + precision: [ir.evaluar(dq, r) for r in filas_b]})
@@ -175,12 +205,75 @@ def _evaluar(inf, ruta_modelo, ruta_contrato, pacientes, muestra, tipo, lotes, c
     if nativo:
         d2 = float(np.abs(res.p_ifthen - res.p_modelo).max())
         inf.check("if-then = modelo original (ingresos reales)", d2 <= tol, f"diferencia máxima {d2:.1e}")
-    tiempos = []
-    for n in lotes:
-        ps = pacientes_base(n, semilla + 1, solo=solo_pacientes)
-        sq, _ = S.compilar(doc, ps, tipo, forzar, precision)
-        df, rl, stn = cliente.ejecutar(sq)
-        tiempos.append({"pacientes": len(ps), "ingresos": len(df), **cliente.resumen_stats(stn, rl)})
-        print(f"  lote {len(ps)}: {tiempos[-1]}", flush=True)
-    if tiempos:
-        inf.d["datos"]["tiempos"] = tiempos
+
+
+def _fecha(serie):
+    return pd.to_datetime(serie, errors="coerce")
+
+
+def descargar_bolsa(doc, nombres):
+    """Bolsa del KNN tal como la ve el SQL (variables de toda la base + y + alta), en memoria: no se guarda en disco."""
+    bolsa, reloj, _ = cliente.ejecutar(S.sql_bolsa(doc))
+    bolsa.columns = [c.lower() for c in bolsa.columns]
+    bolsa = bolsa.rename(columns={K.columna(i): n for i, n in enumerate(nombres)})
+    for n in nombres + ["y"]:
+        bolsa[n] = pd.to_numeric(bolsa[n], errors="coerce").astype(float)
+    bolsa["fin"] = _fecha(bolsa["fin"])
+    return bolsa, reloj
+
+
+def _prediccion_vecinos(inf, obj, origen, doc, dq, nombres, vsrv, srv, precision, tol, tol_prec, nativo, carpeta):
+    bolsa, reloj = descargar_bolsa(dq, nombres)
+    nb = doc["nucleo"]["bolsa"]
+    inf.d["datos"]["bolsa"] = {"ingresos": len(bolsa), "pacientes": int(bolsa.patient_ref.nunique()),
+                               "prevalencia": round(float(bolsa.y.mean()), 4), "descarga_s": round(reloj, 1), **nb}
+    q = vsrv.reset_index(drop=True)
+    t_q = _fecha(q["t_eval"]).to_numpy()
+    filas = q[nombres].to_dict("records")
+
+    def con_bolsa(d):
+        return ir.vecinos(d, ir.entrada(d, filas), ir.entrada(d, bolsa[nombres].to_dict("records")), bolsa.y.to_numpy(),
+                          ids_b=bolsa.episode_ref.to_numpy(dtype=np.int64), pac_q=q.patient_ref.to_numpy(dtype=np.int64),
+                          pac_b=bolsa.patient_ref.to_numpy(dtype=np.int64), t_q=t_q, fin_b=bolsa.fin.to_numpy())
+    res = pd.DataFrame({"episode_ref": q.episode_ref.astype(np.int64), "p_ifthen_bolsa": con_bolsa(doc),
+                        "p_ifthen_bolsa_" + precision: con_bolsa(dq)})
+    if nativo:
+        res["p_modelo_bolsa_entrenamiento"] = ir.predecir_nativo(obj, origen, q[nombres])
+        Zq = ir.entrada(doc, filas)
+        res["p_ifthen_bolsa_entrenamiento"], mios = ir.vecinos(doc, Zq, *ir.bolsa_entrenamiento(obj), indices=True)
+        est = obj.steps[-1][1] if hasattr(obj, "steps") else obj
+        _, suyos = est.kneighbors(Zq)
+        distintos = sum(set(a) != set(b) for a, b in zip(mios, suyos))
+    srv = srv.assign(episode_ref=srv.episode_ref.astype(np.int64))
+    res = res.merge(srv[["episode_ref", "probabilidad", "n_vecinos", "distancia_k"]].rename(columns={"probabilidad": "p_sql"}),
+                    on="episode_ref")
+    res.to_csv(carpeta / "comparacion.csv", index=False)
+    p_sql = pd.to_numeric(res.p_sql, errors="coerce")
+    nv = pd.to_numeric(res.n_vecinos, errors="coerce").fillna(0)
+    k = doc["nucleo"]["k"]
+    if (nv < k).any():
+        inf.aviso(f"{int((nv < k).sum())} de {len(res)} ingresos con menos de k = {k} vecinos admisibles en la bolsa")
+    ambos_nan = p_sql.isna() & res["p_ifthen_bolsa_" + precision].isna()
+    d0 = float(np.nanmax(np.abs(p_sql - res["p_ifthen_bolsa_" + precision]).where(~ambos_nan, 0)))
+    inf.check(f"SQL = if-then en {precision} sobre la misma bolsa ({len(res)} ingresos reales, bolsa de {len(bolsa)})",
+              d0 <= tol and not (p_sql.isna() ^ res["p_ifthen_bolsa_" + precision].isna()).any(),
+              f"diferencia máxima {d0:.1e} (tolerancia {tol:.0e})")
+    dif = np.abs(p_sql - res.p_ifthen_bolsa)
+    inf.d["datos"]["error_precision"] = {"precision": precision, "maxima": float(np.nanmax(dif)), "media": float(np.nanmean(dif))}
+    if tol_prec is not None:
+        inf.check(f"error de la precisión {precision} frente al if-then exacto (misma bolsa)", np.nanmax(dif) <= tol_prec,
+                  f"diferencia máxima {np.nanmax(dif):.1e} (tolerancia {tol_prec:.0e})")
+    if nativo:
+        d2 = float(np.abs(res.p_ifthen_bolsa_entrenamiento - res.p_modelo_bolsa_entrenamiento).max())
+        inf.check("if-then con la bolsa de entrenamiento = modelo original (ingresos reales)", d2 <= C.TOLERANCIA_KNN_SKLEARN,
+                  f"diferencia máxima {d2:.1e} (tolerancia {C.TOLERANCIA_KNN_SKLEARN:.0e}: redondeo de la euclídea de "
+                  "scikit-learn)")
+        texto = f"mismos vecinos que scikit-learn con la bolsa de entrenamiento: {len(mios) - distintos} de {len(mios)} ingresos"
+        if distintos:  # solo puede pasar en un empate a menos de ~1e-7 en el vecino k (redondeo de scikit-learn)
+            inf.aviso(texto + " (los distintos: empates en el borde del vecino k)")
+        else:
+            inf.check("mismos vecinos que scikit-learn (bolsa de entrenamiento, ingresos reales)", True, texto)
+        dm = np.abs(p_sql - res.p_modelo_bolsa_entrenamiento)
+        inf.d["datos"]["cambio_de_bolsa"] = {"maxima": float(np.nanmax(dm)), "media": float(np.nanmean(dm))}
+        inf.aviso(f"SQL (bolsa = FakeNex) frente al modelo con su bolsa de entrenamiento: diferencia máxima "
+                  f"{np.nanmax(dm):.2f}, media {np.nanmean(dm):.3f}; no es un error del SQL, es el cambio de bolsa")

@@ -18,7 +18,8 @@ Archivo de contrato (JSON, opcional; todo tiene valor por defecto):
    "ventana_horas": 48,        las medidas cuentan en [momento - ventana, momento]
    "si_falta": null,           valor de una variable sin datos: null = ausente (NaN para el modelo) o un número (p. ej. 0)
    "constantes": {},           variables sin equivalente en DataNex, con su valor fijo
-   "renombres": {}}            solo para `normalizar`: base original -> código de DataNex (p. ej. "P_ART_S": "TAS")
+   "renombres": {},            solo para `normalizar`: base original -> código de DataNex (p. ej. "P_ART_S": "TAS")
+   "bolsa": {}}                solo KNN: etiqueta_sql, solo_pasado, excluir_mismo_paciente (ver ir.py, núcleo vecinos)
 
 Unidad: cada ingreso HOSP / HOSP_IQ del paciente. Las dos implementaciones (sql_variables en el servidor y
 variables_locales con pandas sobre las tablas crudas descargadas) se comparan en la validación.
@@ -54,17 +55,22 @@ class Contrato:
     si_falta: float = None
     constantes: dict = field(default_factory=dict)
     renombres: dict = field(default_factory=dict)
+    bolsa: dict = field(default_factory=dict)
 
     @classmethod
     def leer(cls, ruta=None):
         if not ruta:
             return cls()
         d = json.loads(Path(ruta).read_text(encoding="utf-8"))
-        return cls(**{k: d[k] for k in ("momento_horas", "ventana_horas", "si_falta", "constantes", "renombres") if k in d})
+        return cls(**{k: d[k] for k in ("momento_horas", "ventana_horas", "si_falta", "constantes", "renombres", "bolsa")
+                      if k in d})
 
     def a_dict(self):
-        return {"momento_horas": self.momento_horas, "ventana_horas": self.ventana_horas, "si_falta": self.si_falta,
-                "constantes": self.constantes}
+        d = {"momento_horas": self.momento_horas, "ventana_horas": self.ventana_horas, "si_falta": self.si_falta,
+             "constantes": self.constantes}
+        if self.bolsa:
+            d["bolsa"] = self.bolsa
+        return d
 
 
 # ------------------------------------------------------------------ gramática

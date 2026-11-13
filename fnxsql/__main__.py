@@ -68,7 +68,7 @@ def main(argv=None):
     p = sub.add_parser("practicar", help="entrena modelos de ejemplo con datos de FakeNex")
     p.add_argument("--salida", default="salidas/practica")
     p.add_argument("--modelos", help="subconjunto separado por comas (logistica, arbol, random_forest, boosting, "
-                                     "red_pequena, red_mediana, red_grande, xgboost)")
+                                     "red_pequena, red_mediana, red_grande, knn, xgboost)")
     p = sub.add_parser("demo", help="practicar + evaluar todos los modelos de ejemplo")
     p.add_argument("--salida", default="salidas")
     p.add_argument("--modelos", help="subconjunto de modelos de práctica")

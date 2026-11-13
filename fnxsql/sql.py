@@ -12,11 +12,20 @@ Estructura de la consulta:
        red / arrays            matrices de pesos en binario; capa = zip_with(pesos, sesgos,
                                (w, b) -> greatest(0, reduce(zip_with(w, x, ...)) + b))
        red / terminos          cada neurona escrita término a término
+       vecinos / arrays        KNN con la bolsa = la propia base (ver más abajo)
   4. probabilidad: sigmoide del logit (o media de las hojas en un random forest).
 
 Precisión (binario.py): float32 por defecto, float64 (exacto) o int8. El documento se cuantiza primero
 (binario.cuantizar) y el SQL escribe exactamente esos valores; las cuentas por ingreso van en double. Un modelo float32
 de por sí (XGBoost) compara float32(x) < umbral y suma las hojas en real con cualquier precisión.
+
+KNN (núcleo "vecinos"): el "modelo" son los datos, así que la bolsa no se incrusta (ni cabría en Athena ni debe viajar):
+es la base original del hospital donde se ejecuta. La consulta principal calcula `vars` de toda la base (la bolsa) y,
+en un WITH anidado (`consulta_vars`), las de los pacientes consultados; cada ingreso cruza como UN array (zip_with +
+reduce) con los ingresos de otros pacientes que tienen etiqueta (y, opcionalmente, alta anterior al momento de
+evaluación); row_number() OVER (PARTITION BY ingreso ORDER BY distancia, vecino) <= k (Trino: top-N por partición) y
+media (ponderada por 1 / distancia). Una sola pasada, exacta, sin bucles: experimento_fakenex/mortalidad/knn_a_sql.py
+(variante "vector"). El coste crece con ingresos consultados x bolsa.
 
 Salvaguardas (config): tamaño máximo del texto (el de AWS Athena, 262.144 bytes; con --forzar, el del proxy de FakeNex)
 y, para "case" / "terminos", número máximo de términos: la red grande escrita término a término (~20.000 operaciones)
@@ -25,10 +34,11 @@ tumbó el coordinador de Trino; con arrays planifica en ~1 s.
 import numpy as np
 
 from . import binario as B
+from . import ir
 from . import config as C
 from .contrato import interpretar, lit, sql_variables, Contrato
 
-TIPOS = {"puntuacion": ["terminos"], "arboles": ["arrays", "case"], "red": ["arrays", "terminos"]}
+TIPOS = {"puntuacion": ["terminos"], "arboles": ["arrays", "case"], "red": ["arrays", "terminos"], "vecinos": ["arrays"]}
 PRECISIONES = B.PRECISIONES
 
 
@@ -68,14 +78,20 @@ def compilar(doc, pids, tipo="auto", forzar=False, precision=None):
     if tipo not in TIPOS[nuc["tipo"]]:
         raise ValueError(f"tipo {tipo!r} no admitido para un núcleo {nuc['tipo']!r} (admitidos: {TIPOS[nuc['tipo']]})")
     precision = precision or C.PRECISION
+    if nuc["tipo"] == "vecinos":  # sin arrays de parámetros: float64 exacto (redondear el preproceso cambiaría vecinos)
+        precision = "float64"
     dq = B.cuantizar(doc, precision)  # los valores exactos que escribe el SQL (literales double o binario)
     contrato = _contrato(dq)
     variables = [interpretar(v["nombre"], contrato) for v in dq["variables"]]
     ex = _expresiones(dq)
     cab = (f"-- {dq['modelo']['nombre']} ({dq['modelo'].get('clase', '')}), núcleo {nuc['tipo']} / {tipo}, {precision}; "
            "generado por fnxsql\n-- desde el documento if-then: una fila por ingreso con la probabilidad del modelo.\n")
-    cuerpo, info = {"puntuacion": _puntuacion, "arboles": _arboles, "red": _red}[nuc["tipo"]](dq, ex, tipo, precision)
-    sql = cab + sql_variables(variables, contrato, pids) + ",\n" + cuerpo
+    if nuc["tipo"] == "vecinos":
+        cuerpo, info = _vecinos(dq, ex, variables, contrato, pids)
+        sql = cab + sql_variables(variables, contrato, None) + ",\n" + cuerpo  # `vars` = la bolsa (toda la base)
+    else:
+        cuerpo, info = {"puntuacion": _puntuacion, "arboles": _arboles, "red": _red}[nuc["tipo"]](dq, ex, tipo, precision)
+        sql = cab + sql_variables(variables, contrato, pids) + ",\n" + cuerpo
     info.update({"tipo_sql": tipo, "precision": precision, "bytes": len(sql.encode("utf-8"))})
     if info["bytes"] > C.MAX_SQL_BYTES_FAKENEX or (info["bytes"] > C.MAX_SQL_BYTES and not forzar):
         raise SQLDemasiadoGrande(
@@ -244,3 +260,65 @@ def _red(doc, ex, tipo, precision):
     cuerpo = (",\n".join(ctes) + ",\nnucleo AS (\n  SELECT patient_ref, episode_ref, t0, t_eval, "
               f"1E0 / (1E0 + exp(-element_at(x, 1))) AS probabilidad FROM x{n}\n)\n" + FINAL)
     return cuerpo, {"pesos": sum(len(w) for c in capas for w in c["pesos"]), "capas": [len(c["sesgos"]) for c in capas]}
+
+
+# ------------------------------------------------------------------ KNN (bolsa = la base)
+ETIQUETA_EXITUS = ("SELECT episode_ref, max(CASE WHEN mot_ref = 23 THEN 1 ELSE 0 END) AS y\n"
+                   "  FROM {esquema}.adm_disch WHERE patient_ref {base} AND mot_type = 'END' GROUP BY episode_ref")
+
+
+def sql_etiqueta_bolsa(bolsa):
+    """Cuerpo del CTE `etiqueta` (episode_ref, y) de la bolsa: el del contrato o, por defecto, alta por exitus. Solo los
+    ingresos que devuelve entran en la bolsa (un ingreso sin desenlace conocido no es un vecino)."""
+    e = bolsa.get("etiqueta_sql") or ETIQUETA_EXITUS
+    return e.replace("{esquema}", C.ESQUEMA).replace("{base}", C.BASE)
+
+
+def sql_bolsa(doc):
+    """Consulta de la bolsa tal como la ve el KNN (para comprobar en local): variables de toda la base + y + alta."""
+    variables = [interpretar(v["nombre"], _contrato(doc)) for v in doc["variables"]]
+    return (sql_variables(variables, _contrato(doc), None) + ",\netiqueta AS (\n  " + sql_etiqueta_bolsa(doc["nucleo"]["bolsa"])
+            + "\n)\nSELECT v.*, CAST(e.y AS double) AS y, ep.end_date AS fin\nFROM vars v JOIN etiqueta e ON e.episode_ref = "
+            f"v.episode_ref\n  JOIN {C.ESQUEMA}.episodes ep ON ep.episode_ref = v.episode_ref AND ep.patient_ref {C.BASE}")
+
+
+def _vecinos(doc, ex, variables, contrato, pids):
+    nuc, bolsa = doc["nucleo"], doc["nucleo"]["bolsa"]
+    ent = doc["entrada_nucleo"]
+    esc = [float(x) for x in ir.escala_vecinos(nuc, len(ent))]
+    arr = "ARRAY[" + ", ".join(ex[n] if e == 1.0 else f"{ex[n]} * {lit(e)}" for n, e in zip(ent, esc)) + "]"
+    fin = bolsa.get("solo_pasado")
+    cond = (["b.patient_ref <> c.patient_ref"] if bolsa.get("excluir_mismo_paciente", True) else []) + \
+           (["b.fin <= c.t_eval"] if fin else [])
+    if nuc["p"] == 2:
+        dist = "sqrt(reduce(zip_with(c.x, b.x, (u, w) -> (u - w) * (u - w)), 0E0, (s, t) -> s + t, s -> s))"
+    else:
+        dist = "reduce(zip_with(c.x, b.x, (u, w) -> abs(u - w)), 0E0, (s, t) -> s + t, s -> s)"
+    if nuc["ponderacion"] == "uniforme":
+        prob = "avg(y)"
+    else:  # regla de scikit-learn con weights="distance": vecinos a distancia 0 -> media de esos
+        prob = "CASE WHEN min(dist) = 0E0 THEN avg(y) FILTER (WHERE dist = 0E0) ELSE sum(y / dist) / sum(1E0 / dist) END"
+    sub = sql_variables(variables, contrato, pids)
+    cuerpo = (
+        f"etiqueta AS (  -- desenlace de cada ingreso de la bolsa (solo entran los que lo tienen)\n  {sql_etiqueta_bolsa(bolsa)}\n),\n"
+        "bolsa AS (  -- la base del hospital: un array por ingreso con la entrada del núcleo\n"
+        f"  SELECT v.patient_ref, v.episode_ref, CAST(e.y AS double) AS y, {'ep.end_date' if fin else 'NULL'} AS fin,\n"
+        f"         {arr} AS x\n  FROM vars v JOIN etiqueta e ON e.episode_ref = v.episode_ref"
+        + (f"\n  JOIN {C.ESQUEMA}.episodes ep ON ep.episode_ref = v.episode_ref AND ep.patient_ref {C.BASE}" if fin else "")
+        + "\n),\n"
+        "consulta_vars AS (  -- variables de los pacientes consultados, aparte (WITH anidado: Trino no materializa CTE)\n"
+        + sub + "\nSELECT * FROM vars\n),\n"
+        "consulta AS (\n  SELECT patient_ref, episode_ref, t0, t_eval,\n         "
+        + arr + " AS x\n  FROM consulta_vars\n),\n"
+        "distancias AS (\n  SELECT c.episode_ref, b.episode_ref AS vecino, b.y,\n         " + dist + " AS dist\n"
+        "  FROM consulta c JOIN bolsa b ON " + (" AND ".join(cond) or "TRUE") + "\n),\n"
+        "vecinos AS (\n  SELECT * FROM (SELECT d.*, row_number() OVER (PARTITION BY episode_ref ORDER BY dist, vecino) AS rk "
+        f"FROM distancias d)\n  WHERE rk <= {nuc['k']}\n),\n"
+        f"agregado AS (\n  SELECT episode_ref, {prob} AS probabilidad, count(*) AS n_vecinos, max(dist) AS distancia_k\n"
+        "  FROM vecinos GROUP BY episode_ref\n),\n"
+        "nucleo AS (\n  SELECT c.patient_ref, c.episode_ref, c.t0, c.t_eval, a.probabilidad, a.n_vecinos, a.distancia_k\n"
+        "  FROM consulta c LEFT JOIN agregado a ON a.episode_ref = c.episode_ref\n)\n"
+        "SELECT patient_ref, episode_ref, t0 AS ingreso, t_eval AS momento, probabilidad, n_vecinos, distancia_k\n"
+        "FROM nucleo\nORDER BY patient_ref, ingreso")
+    return cuerpo, {"k": nuc["k"], "dimensiones": len(ent), "ponderacion": nuc["ponderacion"], "p": nuc["p"],
+                    "ponderada": nuc.get("pesos") is not None, "solo_pasado": bool(fin)}

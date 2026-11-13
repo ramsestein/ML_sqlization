@@ -147,6 +147,9 @@ def cuantizar(doc, precision):
                     h["hoja"] = f32(h["hoja"])
         if int8:
             nuc["escalas"] = escalas
+    elif nuc["tipo"] == "vecinos":  # sin parámetros propios salvo los pesos de la distancia (la bolsa es la base)
+        if nuc.get("pesos") is not None:
+            nuc["pesos"] = [f32(w) for w in nuc["pesos"]]
     else:
         for capa in nuc["capas"]:
             capa["sesgos"] = [f32(b) for b in capa["sesgos"]]

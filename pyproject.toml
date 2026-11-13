@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fnxsql"
-version = "0.2.0"
+version = "0.3.0"
 description = "Modelos de machine learning -> reglas if-then -> una consulta SQL que se ejecuta en FakeNex (DataNex sintético), con validación automática"
 readme = "README.md"
 license = { text = "MIT" }
