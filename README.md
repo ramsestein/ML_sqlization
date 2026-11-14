@@ -248,6 +248,13 @@ Pesos y diferencias con `--precision float32` (por defecto; con JSON en double e
 204.595 bytes con 7 pacientes (cabe en Athena; con JSON en double eran 537 KB), 195 variables idénticas servidor / local,
 SQL vs XGBoost original 5,8·10⁻⁸; 1 / 10 / 50 pacientes en 8,1 / 6,9 / 10,3 s (medición anterior).
 
+**Una métrica PERISIM entrenada fuera** (PERISIM `scripts/fnxsql_fakenex.py`, 14-11-2026): métrica NCA con funciones de
+forma ajustada en PERISIM con los ingresos de entrenamiento del dataset de práctica (2.603 ingresos, 37 variables), k = 50,
+exportada (73 dimensiones, todas `tabla`) y evaluada: PASA, 98.977 bytes con 3 pacientes, 37 variables idénticas servidor
+/ local, SQL = if-then sobre la bolsa de FakeNex (3.262 ingresos, 1.287 pacientes) con diferencia 0; y el caso-base de
+PERISIM en Python con esa misma bolsa = SQL (diferencia máxima 9·10⁻¹⁷ en los 9 ingresos). En local, el artefacto = PERISIM
+en 659 ingresos de test (diferencia 0). 1 / 10 / 50 pacientes en 29,0 / 28,7 / 32,7 s.
+
 **Consultas de referencia** (para extrapolar a DataNex: ejecutándolas allí con N pacientes, el tiempo de un modelo se
 estima escalando su tiempo en FakeNex por la razón de las referencias, sobre todo la de «variables»). Reloj (servidor):
 
