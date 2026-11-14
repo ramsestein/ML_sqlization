@@ -311,7 +311,12 @@ un documento con:
 - bolsa con `un_vecino_por_paciente`: cada paciente cuenta una vez, por su ingreso más cercano (SQL: `row_number()`
   por consulta y paciente antes del top-k).
 
-Tests: el SQL de los pasos = el intérprete (en DuckDB) y el KNN suavizado con un vecino por paciente = una referencia
+Los pasos largos (más de 8 cortes o nodos) van como arrays en un CTE `formas`, escritos una sola vez y consultados con
+`cardinality(filter(...))` (número de cortes ≤ v); los cortos, como `CASE`. Un artefacto PERISIM se evalúa como
+cualquier modelo (`fnxsql evaluar perisim.json`): `ir.cargar` lo reconoce por su formato; la comparación con el modelo
+original (el caso-base de PERISIM en Python) se hace en PERISIM (`scripts/fnxsql_fakenex.py`).
+
+Tests: el SQL de los pasos = el intérprete (en DuckDB, también en su forma de arrays) y el KNN suavizado con un vecino por paciente = una referencia
 por fuerza bruta; en PERISIM (`tests/test_deploy_fnxsql.py`), los pasos reproducen el embedding de PERISIM y el KNN de
 fnxsql da las predicciones del caso-base de PERISIM (salvo cuasi-empates: PERISIM busca en float32).
 

@@ -13,31 +13,43 @@ FORMATO = "perisim_fnxsql_v1"
 
 def documento(artefacto, nombres, contrato, nombre_modelo="perisim"):
     """nombres: entrada de PERISIM -> variable del contrato (gramática de contrato.py)."""
-    if artefacto.get("formato") != FORMATO:
-        raise ValueError(f"artefacto con formato {artefacto.get('formato')!r} (se espera {FORMATO!r})")
+    _formato(artefacto)
     falta = [e for e in artefacto["entradas"] if e not in nombres]
     if falta:
         raise ValueError(f"entradas de PERISIM sin variable del contrato: {falta}")
-    orden = list(artefacto["entradas"])
-    vs, err = variables_del_modelo([nombres[e] for e in orden])
+    art = dict(artefacto, entradas=[nombres[e] for e in artefacto["entradas"]],
+               preproceso=[dict(p, variable=nombres[p["variable"]]) for p in artefacto["preproceso"]])
+    vs, err = variables_del_modelo(art["entradas"], contrato)
     if err:
         raise ValueError(f"variables no válidas para el contrato: {err}")
-    pasos = []
+    return documento_de_variables(art, vs, contrato, nombre_modelo)
+
+
+def _formato(artefacto):
+    if artefacto.get("formato") != FORMATO:
+        raise ValueError(f"artefacto con formato {artefacto.get('formato')!r} (se espera {FORMATO!r})")
+
+
+def documento_de_variables(artefacto, variables, contrato, nombre_modelo="perisim"):
+    """Documento con las variables del contrato ya resueltas (las entradas del artefacto ya tienen sus nombres)."""
+    _formato(artefacto)
+    if contrato.si_falta is not None:
+        raise ValueError("contrato con si_falta numérico: PERISIM trata los ausentes en sus propios pasos (si_falta = null)")
+    if [v.nombre for v in variables] != list(artefacto["entradas"]):
+        raise ValueError("las variables no coinciden con las entradas del artefacto")
     for p in artefacto["preproceso"]:
         if p["tipo"] not in ir.FORMAS:
             raise ValueError(f"paso {p['tipo']!r} no esperado en un artefacto PERISIM")
-        pasos.append(dict(p, variable=nombres[p["variable"]]))
     bolsa = ir.bolsa_de(contrato)
     bolsa.update(un_vecino_por_paciente=bool(artefacto["un_vecino_por_paciente"]),
                  excluir_mismo_paciente=bool(artefacto.get("excluir_mismo_paciente", True)))
-    if contrato.si_falta is not None:
-        raise ValueError("contrato con si_falta numérico: PERISIM trata los ausentes en sus propios pasos (si_falta = null)")
     return {"formato": ir.FORMATO, "modelo": {"nombre": nombre_modelo, "origen": "perisim", "clase": "PERISIM",
                                               "valores_de_entrenamiento": bool(artefacto.get("valores_de_entrenamiento"))},
             "contrato": contrato.a_dict(),
             "variables": [{k: getattr(v, k) for k in ("nombre", "fuente", "codigo", "valor", "estadistico", "constante")
-                           if getattr(v, k) is not None} for v in vs],
-            "preproceso": pasos, "entrada_nucleo": [p["salida"] for p in pasos],
+                           if getattr(v, k) is not None} for v in variables],
+            "preproceso": [dict(p) for p in artefacto["preproceso"]],
+            "entrada_nucleo": [p["salida"] for p in artefacto["preproceso"]],
             "nucleo": {"tipo": "vecinos", "k": int(artefacto["k"]), "ponderacion": "suavizada", "p": 2,
                        "pesos": [float(w) for w in artefacto["pesos"]], "alfa": float(artefacto["alfa"]),
                        "prior": None, "bolsa": bolsa}}

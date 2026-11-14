@@ -112,3 +112,53 @@ def test_sql_vecinos_suavizado():
     assert "PARTITION BY episode_ref, paciente_vecino ORDER BY dist, vecino" in s and "FROM unicos d" in s
     assert "(SELECT avg(y) FROM bolsa) AS pi" in s and "coalesce(a.probabilidad, (SELECT pi FROM prior))" in s
     assert "rk <= 150" in s and "WHEN v000 < " in s
+
+
+def test_artefacto_perisim_se_carga_como_modelo(tmp_path):
+    import json
+    from fnxsql.contrato import Contrato, variables_del_modelo
+    from test_ir import NOMBRES
+    art = {"formato": "perisim_fnxsql_v1", "entradas": NOMBRES[:2],
+           "preproceso": [dict(TABLA, variable=NOMBRES[0], salida="phi0"), dict(INTERP, variable=NOMBRES[1], salida="phi1")],
+           "pesos": [1.2, 0.3], "k": 100, "alfa": 4.0, "un_vecino_por_paciente": True, "excluir_mismo_paciente": True,
+           "valores_de_entrenamiento": False}
+    ruta = tmp_path / "perisim.json"
+    ruta.write_text(json.dumps(art), encoding="utf-8")
+    obj, tipo = ir.cargar(ruta)
+    assert tipo == "perisim" and ir.nombres(obj, tipo) == NOMBRES[:2]
+    vs, err = variables_del_modelo(ir.nombres(obj, tipo), Contrato())
+    doc = ir.a_ir(obj, tipo, vs, Contrato(), "perisim")
+    assert doc["nucleo"]["ponderacion"] == "suavizada" and doc["nucleo"]["bolsa"]["un_vecino_por_paciente"]
+    with pytest.raises(ImportError):
+        ir.bolsa_entrenamiento(obj)
+    s, info = sql.compilar(doc, [1, 2], "auto")
+    assert "FROM unicos d" in s and info["bytes"] < 262144
+
+
+def _a_duckdb(expr):
+    """Traducción mínima de las funciones de array de Trino a DuckDB (solo para probar las expresiones)."""
+    for a, b in (("cardinality(", "len("), ("filter(", "list_filter("), ("element_at(", "list_extract("),
+                 ("contains(", "list_contains("), ("array_position(", "list_position(")):
+        expr = expr.replace(a, b)
+    return expr
+
+
+@pytest.mark.parametrize("paso", ["tabla", "rango", "interpolar"])
+def test_formas_en_arrays_igual_que_el_interprete(paso):
+    duckdb = pytest.importorskip("duckdb")
+    rng = np.random.default_rng(3)
+    c = np.sort(rng.choice(np.round(rng.normal(0, 3, 400), 2), 40, replace=False)).tolist()
+    p = {"tabla": dict(TABLA, cortes=c, valores=rng.normal(size=41).tolist()),
+         "rango": dict(RANGO, cortes=c, valores=rng.normal(size=41).tolist(), en_corte=rng.normal(size=40).tolist()),
+         "interpolar": dict(INTERP, nodos_x=c, nodos_y=np.cumsum(rng.random(40)).tolist())}[paso]
+    formas = {}
+    expr = sql._forma_array(p, "v", 0, formas)
+    vals = [None] + c + list(rng.uniform(-12, 12, 200)) + [c[0] - 1, c[-1] + 1]
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t (v DOUBLE)")
+    con.executemany("INSERT INTO t VALUES (?)", [[None if v is None else float(v)] for v in vals])
+    cols = ", ".join(f"{_a_duckdb(a)} AS {k}" for k, a in formas.items())
+    got = [r[0] for r in con.execute(f"WITH formas AS (SELECT {cols}) SELECT {_a_duckdb(expr)} FROM t CROSS JOIN formas f")
+           .fetchall()]
+    ref = [ir.forma(p, None if v is None else float(v)) for v in vals]
+    assert np.allclose(got, ref, rtol=0, atol=1e-12)

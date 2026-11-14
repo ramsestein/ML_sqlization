@@ -68,6 +68,8 @@ def cargar(ruta):
     ruta = Path(ruta)
     if ruta.suffix.lower() == ".json":
         d = json.loads(ruta.read_text(encoding="utf-8"))
+        if d.get("formato") == "perisim_fnxsql_v1":   # métrica PERISIM exportada (ver perisim.py)
+            return d, "perisim"
         if "learner" not in d:
             raise ValueError(f"{ruta}: no parece un modelo XGBoost guardado con save_model (falta 'learner')")
         return d, "xgboost"
@@ -76,6 +78,8 @@ def cargar(ruta):
 
 
 def nombres(obj, tipo):
+    if tipo == "perisim":
+        return list(obj["entradas"])
     if tipo == "xgboost":
         n = obj["learner"].get("feature_names") or []
         if not n:
@@ -89,6 +93,9 @@ def nombres(obj, tipo):
 
 def predecir_nativo(obj, tipo, X):
     """Probabilidad de la clase 1 con la librería original (X: DataFrame con los nombres del modelo)."""
+    if tipo == "perisim":
+        raise ImportError("métrica PERISIM: el modelo original (su caso-base en Python) se compara en PERISIM "
+                          "(scripts/fnxsql_fakenex.py), no aquí")
     if tipo == "sklearn":
         return obj.predict_proba(X)[:, list(obj.classes_).index(1)]
     import xgboost as xgb
@@ -129,6 +136,9 @@ def a_ir(obj, tipo, variables, contrato, nombre_modelo):
                           if getattr(v, k) is not None} for v in variables],
            "preproceso": []}
     actuales = [v.nombre for v in variables]
+    if tipo == "perisim":
+        from .perisim import documento_de_variables
+        return documento_de_variables(obj, variables, contrato, nombre_modelo)
     if tipo == "xgboost":
         doc["modelo"]["clase"] = "XGBoost"
         doc["entrada_nucleo"], doc["nucleo"] = actuales, _xgboost(obj)
@@ -526,6 +536,9 @@ def vecinos(doc, Xq, Xb, yb, ids_b=None, pac_q=None, pac_b=None, t_q=None, fin_b
 
 def bolsa_entrenamiento(obj):
     """(Xb, yb) del KNN ajustado, en el espacio de la entrada del núcleo (para comprobar el documento frente al modelo)."""
+    if isinstance(obj, dict):  # métrica PERISIM: su bolsa de entrenamiento no viaja (ver predecir_nativo)
+        raise ImportError("métrica PERISIM: el modelo original con su bolsa de entrenamiento se compara en PERISIM "
+                          "(scripts/fnxsql_fakenex.py), no aquí")
     from sklearn.pipeline import Pipeline
     est = obj.steps[-1][1] if isinstance(obj, Pipeline) else obj
     return np.asarray(est._fit_X, float), (np.asarray(est._y) == 1).astype(float)

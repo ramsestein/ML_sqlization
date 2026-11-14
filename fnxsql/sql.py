@@ -93,6 +93,36 @@ def _forma(p, e):
     return "(CASE " + " ".join(ramas) + f" ELSE {lit(p['otro'])} END)"
 
 
+UMBRAL_FORMA_ARRAY = 8  # pasos tabla / interpolar con más cortes o nodos: arrays en un CTE `formas` (el texto, una vez)
+
+
+def _arr(xs):
+    return "ARRAY[" + ", ".join(lit(x) for x in xs) + "]"
+
+
+def _forma_array(p, e, i, formas):
+    """Expresión de un paso tabla / interpolar con sus arrays en el CTE `formas` (columnas f.c{i}, f.v{i}, ...); misma
+    regla que ir.forma. Índices: cardinality(filter(cortes, t -> t <= v)) = número de cortes <= v (searchsorted right)."""
+    nulo = lit(p["nulo"])
+    if p["tipo"] == "tabla":
+        formas[f"c{i}"], formas[f"v{i}"] = _arr(p["cortes"]), _arr(p["valores"])
+        n = f"cardinality(filter(f.c{i}, t -> t <= {e}))"
+        val = f"element_at(f.v{i}, 1 + {n})"
+        if p.get("en_corte") is not None:
+            formas[f"e{i}"] = _arr(p["en_corte"])
+            val = f"(CASE WHEN contains(f.c{i}, {e}) THEN element_at(f.e{i}, array_position(f.c{i}, {e})) ELSE {val} END)"
+        return f"(CASE WHEN {e} IS NULL THEN {nulo} ELSE {val} END)"
+    X, Y = p["nodos_x"], p["nodos_y"]
+    if np.any(np.diff(X) <= 0):
+        raise ValueError("interpolar: nodos_x estrictamente crecientes")
+    formas[f"x{i}"], formas[f"y{i}"] = _arr(X), _arr(Y)
+    n, m = f"cardinality(filter(f.x{i}, t -> t <= {e}))", len(X)
+    xi, yi = f"element_at(f.x{i}, {n})", f"element_at(f.y{i}, {n})"
+    xj, yj = f"element_at(f.x{i}, {n} + 1)", f"element_at(f.y{i}, {n} + 1)"
+    return (f"(CASE WHEN {e} IS NULL THEN {nulo} WHEN {e} <= {lit(X[0])} THEN {lit(Y[0])} WHEN {e} >= {lit(X[-1])} "
+            f"THEN {lit(Y[-1])} ELSE {yi} + ({e} - {xi}) * ({yj} - {yi}) / ({xj} - {xi}) END)")
+
+
 def compilar(doc, pids, tipo="auto", forzar=False, precision=None):
     """(sql, info) para los pacientes `pids`. tipo: "auto" (el primero admitido) o uno de TIPOS[núcleo].
     precision: "float32" (por defecto, config.PRECISION), "float64" o "int8"."""
@@ -325,20 +355,29 @@ def _vecinos(doc, ex, variables, contrato, pids):
         prob = "avg(y)"
     else:  # regla de scikit-learn con weights="distance": vecinos a distancia 0 -> media de esos
         prob = "CASE WHEN min(dist) = 0E0 THEN avg(y) FILTER (WHERE dist = 0E0) ELSE sum(y / dist) / sum(1E0 / dist) END"
+    formas = {}
+    for i, p in enumerate(doc["preproceso"]):  # funciones de forma largas (PERISIM): arrays una sola vez en `formas`
+        if p["tipo"] in ("tabla", "interpolar") and len(p.get("cortes", p.get("nodos_x", []))) > UMBRAL_FORMA_ARRAY:
+            ex[p["salida"]] = _forma_array(p, ex[p["variable"]], i, formas)
+    if formas:
+        arr = "ARRAY[" + ", ".join(ex[n] if e == 1.0 else f"{ex[n]} * {lit(e)}" for n, e in zip(ent, esc)) + "]"
+    cruce = "\n  CROSS JOIN formas f" if formas else ""
     sub = sql_variables(variables, contrato, pids)
     unico = bolsa.get("un_vecino_por_paciente", False)
     pi = (f"(SELECT avg(y) FROM bolsa)" if nuc.get("prior") is None else lit(float(nuc["prior"])))
     cuerpo = (
-        f"etiqueta AS (  -- desenlace de cada ingreso de la bolsa (solo entran los que lo tienen)\n  {sql_etiqueta_bolsa(bolsa)}\n),\n"
+        ("formas AS (  -- funciones de forma de la métrica (arrays)\n  SELECT " + ",\n         ".join(
+            f"{v} AS {k}" for k, v in formas.items()) + "\n),\n" if formas else "")
+        + f"etiqueta AS (  -- desenlace de cada ingreso de la bolsa (solo entran los que lo tienen)\n  {sql_etiqueta_bolsa(bolsa)}\n),\n"
         "bolsa AS (  -- la base del hospital: un array por ingreso con la entrada del núcleo\n"
         f"  SELECT v.patient_ref, v.episode_ref, CAST(e.y AS double) AS y, {'ep.end_date' if fin else 'NULL'} AS fin,\n"
-        f"         {arr} AS x\n  FROM vars v JOIN etiqueta e ON e.episode_ref = v.episode_ref"
+        f"         {arr} AS x\n  FROM vars v JOIN etiqueta e ON e.episode_ref = v.episode_ref" + cruce
         + (f"\n  JOIN {C.ESQUEMA}.episodes ep ON ep.episode_ref = v.episode_ref AND ep.patient_ref {C.BASE}" if fin else "")
         + "\n),\n"
         "consulta_vars AS (  -- variables de los pacientes consultados, aparte (WITH anidado: Trino no materializa CTE)\n"
         + sub + "\nSELECT * FROM vars\n),\n"
         "consulta AS (\n  SELECT patient_ref, episode_ref, t0, t_eval,\n         "
-        + arr + " AS x\n  FROM consulta_vars\n),\n"
+        + arr + " AS x\n  FROM consulta_vars" + cruce + "\n),\n"
         "distancias AS (\n  SELECT c.episode_ref, b.episode_ref AS vecino, b.patient_ref AS paciente_vecino, b.y,\n         "
         + dist + " AS dist\n"
         "  FROM consulta c JOIN bolsa b ON " + (" AND ".join(cond) or "TRUE") + "\n),\n"
@@ -357,4 +396,5 @@ def _vecinos(doc, ex, variables, contrato, pids):
         "SELECT patient_ref, episode_ref, t0 AS ingreso, t_eval AS momento, probabilidad, n_vecinos, distancia_k\n"
         "FROM nucleo\nORDER BY patient_ref, ingreso")
     return cuerpo, {"k": nuc["k"], "dimensiones": len(ent), "ponderacion": nuc["ponderacion"], "p": nuc["p"],
-                    "ponderada": nuc.get("pesos") is not None, "solo_pasado": bool(fin), "un_vecino_por_paciente": unico}
+                    "ponderada": nuc.get("pesos") is not None, "solo_pasado": bool(fin), "un_vecino_por_paciente": unico,
+                    "formas_en_arrays": len({k[1:] for k in formas})}
