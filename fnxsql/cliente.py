@@ -82,7 +82,13 @@ def ejecutar(sql, timeout=180, max_segundos=None):
                 raise ErrorFakeNex(f"la consulta tardó {st['elapsedTimeMillis'] / 1000:.0f} s en el servidor (máximo "
                                    f"{limite} s): se detiene la batería para no sobrecargarlo")
             return pd.DataFrame(filas, columns=cols), time.time() - t, st
-        r = _get(r["nextUri"], timeout)
+        try:
+            r = _get(r["nextUri"], timeout)
+        except urllib.error.HTTPError as e:
+            if e.code in (502, 503):
+                raise ErrorFakeNex(f"FakeNex dejó de responder durante la consulta (HTTP {e.code}; probablemente se reinició): "
+                                   "la consulta se ha perdido") from e
+            raise
 
 
 def resumen_stats(st, reloj):
