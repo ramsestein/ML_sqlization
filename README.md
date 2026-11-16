@@ -170,8 +170,8 @@ Salidas en `salidas/<modelo>/`: `informe.md` / `informe.json`, `if_then.json`, `
 | `sql MODELO` | solo la consulta, sin ejecutarla | `--pacientes` / `--muestra`, `--sql`, `--precision`, `--salida` |
 | `practicar` | entrenar modelos de ejemplo con datos de FakeNex | `--modelos`, `--salida` |
 | `demo` | `practicar` + `evaluar` de todos | `--modelos`, `--muestra`, `--lotes`, `--sql`, `--precision` |
-| `entrenar` | gradient boosting (XGBoost hist) entrenado dentro de la consulta, sin descargar filas | `--variables`, `--arboles`, `--profundidad`, `--eta`, `--lambda`, `--min-hijo`, `--min-ingresos`, `--bins`, `--prueba`, `--paciencia`, `--arboles-por-consulta`, `--metodo`, `--salida` |
-| `comparar` | estudio: `entrenar` frente a descargar los datos y entrenar XGBoost en local | las de `entrenar` y `--repeticiones` |
+| `datanex preparar` | consultas `.txt` autocontenidas para DataNex (variables e inferencia de 10 pacientes al azar) y su zip | `--modelos`, `--pacientes`, `--esquema`, `--salida` |
+| `datanex comprobar` | compara los CSV de inferencia de DataNex con los modelos en local | `--csv` |
 
 Globales: `--url` (o `FAKENEX_URL`) y `--usuario` (o `FAKENEX_USER`; por defecto uno aleatorio `fnxsql-xxxxxxxx`).
 
@@ -243,95 +243,32 @@ float32: el SQL hace las mismas cuentas en real que el modelo.
 (PCA + boosting y KNN se probaron en el experimento pero no están en `fnxsql`: el PCA no es un paso de Pipeline admitido
 y el "modelo" de un KNN son sus datos de entrenamiento.)
 
-## Experimental: entrenar el modelo con consultas SQL
+## Prueba en DataNex (consultas autocontenidas)
 
-¿Se puede **entrenar** un gradient boosting dentro del data warehouse, sin permiso de escritura, sin que salga ninguna
-fila de pacientes y con un número de consultas que una persona pueda lanzar? Sí: `fnxsql entrenar` reproduce el
-algoritmo de XGBoost con histogramas (`tree_method="hist"`) **dentro de la consulta**: 100 árboles = 5 consultas de
-~75 s, y del servidor solo salen los árboles.
-
-```
-una fila con todos los ingresos de entrenamiento y de prueba como arrays (variables en float32 + desenlace)
-   y los cortes de cada variable (approx_percentile, float32; como max_bin)                  ← todo en el servidor
-reduce(sequence(1, árboles × 21), estado, (estado, paso) -> CASE paso ...)   una máquina de estados:
-   inicio del árbol      g = p − y, h = p(1 − p), pérdida de entrenamiento y de prueba
-   por cada nivel        claves (nodo, variable, intervalo) → histograma (multimap_from_entries) → sumas acumuladas
-                         → ganancia de cada corte con los ausentes a cada lado → mejor corte por nodo → nuevo nodo
-   hojas y cierre        hoja = float32(−η·G / (H + λ)); margen += hoja (en real, como XGBoost)
-salida: una fila con los árboles (por nodos en anchura) y la pérdida por número de árboles
-```
-
-Si el bucle no cabe en el tiempo de una consulta, `--arboles-por-consulta` lo parte: cada consulta recibe los cortes y
-el modelo hecho como arrays binarios float32 (como en la inferencia) y sigue desde ahí.
-
-```bash
-python -m fnxsql entrenar --arboles 100 --profundidad 3 --eta 0.1      # 5 consultas (--arboles-por-consulta 20)
-python -m fnxsql evaluar salidas/boosting_sql/boosting_sql.json --muestra 5   # su consulta de inferencia, validada
-python -m fnxsql comparar --arboles 100 --profundidad 3 --eta 0.1      # estudio frente a descarga + XGBoost
-```
-
-El resultado se guarda como documento if-then y como **JSON de XGBoost** (lo carga `xgboost.Booster` y lo evalúa
-`fnxsql evaluar`, como cualquier otro XGBoost). Partición entrenamiento / prueba por paciente con un hash de
-`patient_ref`, idéntico en SQL y en Python. `--min-ingresos`: mínimo de ingresos por hijo (tamaño mínimo de cada
-agregado; no es privacidad formal). `--paciencia`: parada temprana por la pérdida de prueba. `--metodo niveles` es la
-primera versión: una consulta por árbol y nivel (302 para 100 árboles de profundidad 3; ~7 s cada una).
-
-**Resultado** (`comparar`, noviembre de 2026; 37 variables de `practicar`, 2.583 ingresos de entrenamiento y 679 de
-prueba con 51 muertes; 100 árboles, profundidad 3, η 0,1, λ 1, `min_child_weight` 1, 256 intervalos; informe completo
-en `resultados/entrenar_sql_vs_xgboost.md`):
-
-| | Entrenar con SQL | Descargar + XGBoost en local |
-|---|---|---|
-| Consultas | **5** (20 árboles cada una) | 1 (la descarga) |
-| Tiempo | 377 s (75 s por consulta; 107 s de CPU del servidor en total) | 8,5 s (8,4 de descarga + 0,04 de entrenamiento) |
-| Tamaño de cada consulta | 92-138 KB (cabe en Athena) | 12 KB |
-| Memoria por consulta | ≤ 41 MB | - |
-| Filas de pacientes que salen del servidor | **0** (5 filas: árboles y pérdidas) | **3.262** (137.004 valores) |
-| AUC / pérdida logística / Brier en prueba | 0,8750 / 0,1808 / 0,0484 | 0,8657 / 0,1819 / 0,0482 |
-
-- **El SQL calcula exactamente lo previsto**: el mismo algoritmo en numpy (mismas sumas en el mismo orden) da los mismos
-  1.396 nodos y las mismas hojas (diferencia 0).
-- **Es XGBoost**: XGBoost entrenado en local con los mismos cortes da las mismas probabilidades (diferencia máxima
-  6·10⁻⁸). Frente a XGBoost con sus propios cortes (otro cálculo de cuantiles) la probabilidad difiere en media 0,009
-  (máx. 0,12; Spearman 0,98) y la calidad es la misma (la diferencia de AUC está dentro del ruido de 51 muertes; con
-  XGBoost en local, `max_bin` entre 16 y 256 da AUC de 0,856 a 0,867).
-- **El modelo entrenado en SQL pasa `evaluar`**: su consulta de inferencia (21 KB) = modelo hasta 3,6·10⁻⁹.
-- El precio es el tiempo: ~45 veces más que descargar y entrenar. Lo que se gana es que ninguna fila de pacientes sale
-  del servidor y que basta con permiso de lectura.
-
-**Prueba en DataNex** (`datanex/consultas_datanex.zip`, generado con `python -m fnxsql datanex preparar`): consultas
-`.txt` autocontenidas para pegar en Athena; cada una da su CSV y no depende de ninguna otra. Los pacientes se eligen
-dentro de cada consulta con un hash de `patient_ref` (sin el filtro de la base original de FakeNex):
+En DataNex no hay API: cada consulta se pega en Athena y su resultado se descarga como CSV. `python -m fnxsql datanex
+preparar` escribe en `datanex/consultas/` (y en `datanex/consultas_datanex.zip`) consultas `.txt` **aisladas**: cada una se
+ejecuta sola y da su CSV. Los pacientes se eligen dentro de cada consulta con un hash de `patient_ref` entre los que tienen
+algún ingreso HOSP / HOSP_IQ (sin el filtro de la base original de FakeNex), así que todas ven los mismos:
 
 | Consulta | Resultado (CSV) |
 |---|---|
 | `00_variables_10_pacientes` | las 37 variables de los ingresos de 10 pacientes al azar |
-| `01`–`10_inferencia_<modelo>` | probabilidad de cada modelo (los 8 de práctica, `boosting_sql`, `xgboost_local`) para esos ingresos |
-| `11_entrenamiento_20_arboles`, `12_entrenamiento_100_arboles` | el entrenamiento completo en UNA consulta (1000 pacientes al azar): el modelo como tabla, una fila por nodo de cada árbol (variable, umbral, ausentes, hoja, pérdida tras el árbol) |
+| `01`–`08_inferencia_<modelo>` | probabilidad de cada modelo de práctica para esos ingresos |
 
-`python -m fnxsql datanex comprobar --csv <carpeta>` compara cada inferencia con el modelo evaluado en local sobre el CSV
-de variables; `python -m fnxsql datanex importar <entrenamiento>.csv` convierte la tabla en un JSON de XGBoost. Ensayado
-en FakeNex con los mismos ficheros: variables 6 s, cada inferencia 5-9 s (todas = modelo en local, de 8·10⁻¹⁷ a 6·10⁻⁸),
-entrenamiento de 20 árboles 146 s (2.407 ingresos); el modelo importado de la tabla reproduce las pérdidas calculadas
-dentro de la consulta hasta 9·10⁻¹⁵. El de 100 árboles en una consulta no se ensayó en FakeNex (ver lecciones).
+`python -m fnxsql datanex comprobar --csv <carpeta>` compara cada CSV de inferencia con el modelo evaluado en local sobre
+el CSV de variables (`comprobacion.csv`). Lee también CSV formateados por la herramienta de exportación (separadores de
+miles, valores redondeados): entonces compara a la precisión que trae cada valor.
 
-Lecciones de esta parte:
+**Resultado en DataNex** (noviembre de 2026; consultas 00 a 04): las 5 se ejecutaron; 15 ingresos de los 10 pacientes,
+los mismos en todas. Las 60 probabilidades (4 modelos × 15 ingresos) = modelo evaluado en local sobre las variables que
+devolvió DataNex, a la precisión del CSV (la exportación redondea las probabilidades a 2 cifras y las variables a 2
+decimales). Dos observaciones:
 
-- **Las lambdas anidadas cuestan en el proxy de FakeNex, no en Trino**: el tiempo de aceptar una consulta crece de forma
-  exponencial con el anidamiento de lambdas (medido: 8 niveles +3 s, 9 +10 s, 10 +30 s; Trino planificaba en 0,3 s).
-  La primera versión, con «variables locales» `element_at(transform(ARRAY[x], v -> ...), 1)` anidadas (~20 niveles), no
-  terminó en 10 min ni con 2 variables. La máquina de estados no pasa de 6 niveles.
-- **Una sola expresión enorme no compila** («expressions are too complex»: el método de la JVM tiene un tamaño máximo).
-  Cada rama del `CASE` va en su propia lambda, que Trino compila en un método aparte.
-- **Crear filas por candidato es lo caro**: con la ganancia de cada corte como `ROW`, 10 árboles tardaban 118 s; con las
-  ganancias vectorizadas (`zip` + `array_max` + `array_position`), 62 s.
-- **Cientos de consultas no son viables**: la versión por niveles necesitaba 302, y FakeNex se reinició durante una de
-  esas tandas (árbol 36). Con una sola consulta de 100 árboles también se reinició a los ~2 min (no sabemos si por la
-  consulta); en tandas de 20 árboles (~75 s cada una) no ha vuelto a pasar.
-- **Sin materializar los CTE, cada CTE se usa una vez** (versión por niveles): si los histogramas se leían dos veces,
-  Trino recalculaba las variables (25-55 s por consulta frente a 6-10 s).
-- `approx_percentile` no es determinista entre ejecuciones: dos entrenamientos pueden diferir ligeramente en los cortes
-  (y por tanto en el modelo); dentro de un entrenamiento los cortes son fijos.
+- FC, TAS, FR y TEMP salen vacías en todos los ingresos (también LAB110 y LABHBST), mientras PULSIOX, ESTADO_CONCIENC y
+  varios laboratorios tienen datos: probablemente esos códigos de `rc` se llaman de otra forma en DataNex que en FakeNex.
+  Con ellas ausentes, el árbol de práctica da la misma probabilidad (0,02) a todos.
+- La exportación formatea los valores (separadores de miles, fechas en texto, redondeo). Para recuperar la precisión
+  completa habría que sacar las columnas como texto (`CAST(... AS varchar)`) en la consulta.
 
 ## Lecciones (medidas durante el desarrollo)
 - **Trino no materializa los CTE** y funde las proyecciones que se usan una sola vez: 77 árboles en columnas separadas
@@ -360,15 +297,11 @@ fnxsql/
   validar.py    evaluación con comprobaciones automáticas e informe
   normalizar.py renombrado de variables a códigos de DataNex
   practicar.py  modelos de práctica con datos de FakeNex
-  entrenar.py   gradient boosting con una consulta por árbol y nivel; partición, exportación (if-then / XGBoost), réplica
-  entrenar_una.py  el mismo entrenamiento dentro de una consulta (máquina de estados con reduce) y su réplica en numpy
   datanex.py    consultas .txt autocontenidas para DataNex (Athena), lectura de sus CSV y comprobación
-  comparar.py   estudio: entrenar con SQL frente a descargar y entrenar XGBoost
   __main__.py   orquestador (python -m fnxsql)
 ejemplos/       contratos de ejemplo
-resultados/     informe de `comparar` (entrenar con SQL frente a descargar y entrenar XGBoost)
 datanex/        consultas para DataNex (consultas/*.txt y su zip), documentos if-then de los modelos y plan.json
-tests/          tests sin red (gramática, exactitud del if-then por tipo de modelo, compilación SQL, entrenamiento)
+tests/          tests sin red (gramática, exactitud del if-then por tipo de modelo, compilación SQL, DataNex)
 ```
 
 ## Licencia
