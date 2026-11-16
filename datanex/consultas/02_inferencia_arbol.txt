@@ -1,0 +1,168 @@
+-- Inferencia: arbol (DecisionTreeClassifier) para los ingresos de 10 pacientes al azar
+-- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en
+-- datanex/resultados/02_inferencia_arbol.csv
+-- arbol (DecisionTreeClassifier), núcleo arboles / arrays, float32; generado por fnxsql
+-- desde el documento if-then: una fila por ingreso con la probabilidad del modelo.
+WITH
+cohorte AS (  -- 10 pacientes al azar (hash de patient_ref, semilla 1) con algún ingreso HOSP / HOSP_IQ
+  SELECT patient_ref FROM (SELECT DISTINCT patient_ref FROM datascope_gestor_prod.episodes
+                           WHERE episode_type_ref IN ('HOSP', 'HOSP_IQ'))
+  ORDER BY mod(mod(patient_ref, 2147483648) * 2654435761 + 2246822519, 4294967296), patient_ref LIMIT 10
+),
+adm AS (  -- ingresos; momento de evaluación = inicio + 24 h (o el alta si es antes)
+  SELECT patient_ref, episode_ref, start_date AS t0, least(start_date + INTERVAL '24' HOUR, end_date) AS t_eval
+  FROM datascope_gestor_prod.episodes WHERE patient_ref IN (SELECT patient_ref FROM cohorte) AND episode_type_ref IN ('HOSP', 'HOSP_IQ')
+),
+rc_num AS (
+  SELECT a.episode_ref AS ep_rc_num,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'FC') AS v000,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v001,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v002,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v003,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v004,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v005,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v006,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v007,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'FR') AS v008,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v009,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v010,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v011,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v012,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v013,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v014,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v015,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v016,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v017,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v018,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v019
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND r.result_num IS NOT NULL AND r.rc_sap_ref IN ('FC', 'FR', 'PULSIOX', 'TAS', 'TEMP') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+rc_cat AS (
+  SELECT a.episode_ref AS ep_rc_cat,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_1' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v032,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_2' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v033,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_3' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v034
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND r.rc_sap_ref IN ('ESTADO_CONCIENC') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+lab AS (
+  SELECT a.episode_ref AS ep_lab,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2467') AS v020,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2467') AS v021,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB110') AS v022,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB110') AS v023,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LABRPAK') AS v024,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABRPAK') AS v025,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB1300') AS v026,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB1300') AS v027,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v028,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v029,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v030,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v031
+  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref AND l.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND l.result_num IS NOT NULL AND l.lab_sap_ref IN ('LAB110', 'LAB1300', 'LAB2467', 'LAB2575', 'LABHBST', 'LABRPAK') AND l.extrac_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+vars AS (
+  SELECT a.patient_ref, a.episode_ref, a.t0, a.t_eval,
+         -- FC_last
+         CAST(v000 AS double) AS v000,
+         -- FC_mean
+         CAST(v001 AS double) AS v001,
+         -- FC_min
+         CAST(v002 AS double) AS v002,
+         -- FC_max
+         CAST(v003 AS double) AS v003,
+         -- TAS_last
+         CAST(v004 AS double) AS v004,
+         -- TAS_mean
+         CAST(v005 AS double) AS v005,
+         -- TAS_min
+         CAST(v006 AS double) AS v006,
+         -- TAS_max
+         CAST(v007 AS double) AS v007,
+         -- FR_last
+         CAST(v008 AS double) AS v008,
+         -- FR_mean
+         CAST(v009 AS double) AS v009,
+         -- FR_min
+         CAST(v010 AS double) AS v010,
+         -- FR_max
+         CAST(v011 AS double) AS v011,
+         -- TEMP_last
+         CAST(v012 AS double) AS v012,
+         -- TEMP_mean
+         CAST(v013 AS double) AS v013,
+         -- TEMP_min
+         CAST(v014 AS double) AS v014,
+         -- TEMP_max
+         CAST(v015 AS double) AS v015,
+         -- PULSIOX_last
+         CAST(v016 AS double) AS v016,
+         -- PULSIOX_mean
+         CAST(v017 AS double) AS v017,
+         -- PULSIOX_min
+         CAST(v018 AS double) AS v018,
+         -- PULSIOX_max
+         CAST(v019 AS double) AS v019,
+         -- LAB2467_last
+         CAST(v020 AS double) AS v020,
+         -- LAB2467_max
+         CAST(v021 AS double) AS v021,
+         -- LAB110_last
+         CAST(v022 AS double) AS v022,
+         -- LAB110_max
+         CAST(v023 AS double) AS v023,
+         -- LABRPAK_last
+         CAST(v024 AS double) AS v024,
+         -- LABRPAK_max
+         CAST(v025 AS double) AS v025,
+         -- LAB1300_last
+         CAST(v026 AS double) AS v026,
+         -- LAB1300_max
+         CAST(v027 AS double) AS v027,
+         -- LABHBST_last
+         CAST(v028 AS double) AS v028,
+         -- LABHBST_max
+         CAST(v029 AS double) AS v029,
+         -- LAB2575_last
+         CAST(v030 AS double) AS v030,
+         -- LAB2575_max
+         CAST(v031 AS double) AS v031,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_1_last
+         CAST(v032 AS double) AS v032,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_2_last
+         CAST(v033 AS double) AS v033,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_3_last
+         CAST(v034 AS double) AS v034,
+         -- age
+         CAST(CAST(date_diff('day', CAST(d.birth_date AS timestamp(3)), a.t_eval) AS double) / 365.25E0 AS double) AS v035,
+         -- sex_2
+         CAST(CASE WHEN d.sex IS NULL THEN NULL WHEN d.sex = 2 THEN 1E0 ELSE 0E0 END AS double) AS v036
+  FROM adm a
+  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref IN (SELECT patient_ref FROM cohorte)
+  LEFT JOIN rc_num ON rc_num.ep_rc_num = a.episode_ref
+  LEFT JOIN rc_cat ON rc_cat.ep_rc_cat = a.episode_ref
+  LEFT JOIN lab ON lab.ep_lab = a.episode_ref
+),
+arb_bin AS (SELECT from_base64('BHEBMgEzARQCNQEWAAABtgKXAAAAAAE2AAABFgOHArgAAAFoAAAAAAAAAAAAAAAAAAAAAAAA') AS bc, from_base64('PwAAAEHMAABBzAAAQy+AAEK3AABDKIAAP1ttt0IWmZlCxwAAPwiIiT1DDDFBvAAAPyLoukMjgABBamZmP8HrhT7mZmZBhAAAPsMMMTyl7Qk9pPCJPj9L9T1eEoI9vyWMPqqqqz6LoukAAAAA') AS bv, from_base64('AQ==') AS br),
+arb_cod AS (SELECT transform(sequence(0, 26), i -> from_big_endian_32(X'0000' || substr(bc, 2 * i + 1, 2))) AS c, transform(sequence(0, 26), i -> from_ieee754_32(substr(bv, 4 * i + 1, 4))) AS v, transform(sequence(0, 0), i -> from_big_endian_32(X'000000' || substr(br, i + 1, 1))) AS raices FROM arb_bin),
+arboles AS (  -- f = variable (0 en las hojas), mg = nulo a la izquierda, d = distancia al hijo izquierdo,
+              -- v = umbral o valor de la hoja
+  SELECT transform(c, z -> z / 32) AS f, transform(c, z -> (z / 16) % 2) AS mg, transform(c, z -> z % 16) AS d, v, raices FROM arb_cod
+),
+vec AS (SELECT patient_ref, episode_ref, t0, t_eval, ARRAY[CAST(v000 AS real), CAST(v001 AS real), CAST(v002 AS real), CAST(v003 AS real), CAST(v004 AS real), CAST(v005 AS real), CAST(v006 AS real), CAST(v007 AS real), CAST(v008 AS real), CAST(v009 AS real), CAST(v010 AS real), CAST(v011 AS real), CAST(v012 AS real), CAST(v013 AS real), CAST(v014 AS real), CAST(v015 AS real), CAST(v016 AS real), CAST(v017 AS real), CAST(v018 AS real), CAST(v019 AS real), CAST(v020 AS real), CAST(v021 AS real), CAST(v022 AS real), CAST(v023 AS real), CAST(v024 AS real), CAST(v025 AS real), CAST(v026 AS real), CAST(v027 AS real), CAST(v028 AS real), CAST(v029 AS real), CAST(v030 AS real), CAST(v031 AS real), CAST(v032 AS real), CAST(v033 AS real), CAST(v034 AS real), CAST(v035 AS real), CAST(v036 AS real)] AS x FROM vars),
+hojas AS (
+  SELECT q.patient_ref, q.episode_ref, q.t0, q.t_eval,
+         transform(sequence(1, 1), t -> reduce(sequence(1, 5), element_at(a.raices, t), (n, i) -> IF(element_at(a.f, n) = 0, n, IF(CASE WHEN element_at(q.x, element_at(a.f, n)) IS NULL THEN element_at(a.mg, n) = 1 ELSE element_at(q.x, element_at(a.f, n)) <= element_at(a.v, n) END, n + element_at(a.d, n), n + element_at(a.d, n) + 1)), n -> element_at(a.v, n))) AS c
+  FROM vec q CROSS JOIN arboles a
+),
+nucleo AS (
+  SELECT patient_ref, episode_ref, t0, t_eval, reduce(c, 0E0, (s, h) -> s + h, s -> s) / 1.0000000000000000E+00 AS probabilidad FROM hojas
+)
+SELECT patient_ref, episode_ref, t0 AS ingreso, t_eval AS momento, probabilidad
+FROM nucleo
+ORDER BY patient_ref, ingreso

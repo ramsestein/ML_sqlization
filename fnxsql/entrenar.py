@@ -40,7 +40,7 @@ from . import binario as B, cliente, config as C, contrato as K, ir
 from .binario import f32
 from .contrato import lit
 
-HASH_MULT, HASH_MOD = 2654435761, 2 ** 32  # hash multiplicativo de Knuth: patient_ref -> [0, 2^32)
+HASH_MULT, HASH_MOD = K.HASH_MULT, K.HASH_MOD  # hash multiplicativo de Knuth: patient_ref -> [0, 2^32)
 EPS_GANANCIA = 1e-6  # kRtEps de XGBoost: un corte tiene que mejorar más que esto
 DECIMALES_EMPATE = 9
 
@@ -63,10 +63,8 @@ def corte_prueba(p):
 
 
 def es_prueba(pids, p):
-    """Mismo criterio que el SQL: mod(patient_ref * 2654435761, 2^32) < prueba * 2^32."""
-    pids = np.asarray(pids, dtype=np.int64)
-    assert pids.max(initial=0) < 2 ** 33, "patient_ref demasiado grande para el hash en int64"
-    return (pids * HASH_MULT) % HASH_MOD < corte_prueba(p)
+    """Mismo criterio que el SQL: hash(patient_ref) < prueba * 2^32 (contrato.hash_sql / hash_py)."""
+    return K.hash_py(pids) < corte_prueba(p)
 
 
 def margen_base(positivos, n):
@@ -80,12 +78,13 @@ def _real(x):
 
 
 # ------------------------------------------------------------------ SQL
-def sql_base(variables, contrato, p):
-    """CTEs `vars`, `etiqueta` y `t` (variables + y + prueba) de toda la base original de FakeNex."""
-    return (K.sql_variables(variables, contrato, None) + ",\n" + K.sql_etiqueta(None) + ",\n"
+def sql_base(variables, contrato, p, cohorte=None):
+    """CTEs `vars`, `etiqueta` y `t` (variables + y + prueba): toda la base original de FakeNex o, con `cohorte`
+    (contrato.Cohorte), los pacientes elegidos dentro de la consulta (DataNex)."""
+    return (K.sql_variables(variables, contrato, None, cohorte) + ",\n" + K.sql_etiqueta(None, cohorte) + ",\n"
             "t AS (  -- y = muerte en el ingreso; prueba = paciente de prueba (hash de patient_ref)\n"
             f"  SELECT v.*, CAST(coalesce(e.muere, 0) AS double) AS y,\n"
-            f"         mod(v.patient_ref * {HASH_MULT}, {HASH_MOD}) < {corte_prueba(p)} AS prueba\n"
+            f"         {K.hash_sql('v.patient_ref')} < {corte_prueba(p)} AS prueba\n"
             "  FROM vars v LEFT JOIN etiqueta e ON e.ep_et = v.episode_ref\n)")
 
 

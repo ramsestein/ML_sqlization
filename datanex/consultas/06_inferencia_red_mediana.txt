@@ -1,0 +1,171 @@
+-- Inferencia: red_mediana (MLPClassifier) para los ingresos de 10 pacientes al azar
+-- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en
+-- datanex/resultados/06_inferencia_red_mediana.csv
+-- red_mediana (MLPClassifier), núcleo red / arrays, float32; generado por fnxsql
+-- desde el documento if-then: una fila por ingreso con la probabilidad del modelo.
+WITH
+cohorte AS (  -- 10 pacientes al azar (hash de patient_ref, semilla 1) con algún ingreso HOSP / HOSP_IQ
+  SELECT patient_ref FROM (SELECT DISTINCT patient_ref FROM datascope_gestor_prod.episodes
+                           WHERE episode_type_ref IN ('HOSP', 'HOSP_IQ'))
+  ORDER BY mod(mod(patient_ref, 2147483648) * 2654435761 + 2246822519, 4294967296), patient_ref LIMIT 10
+),
+adm AS (  -- ingresos; momento de evaluación = inicio + 24 h (o el alta si es antes)
+  SELECT patient_ref, episode_ref, start_date AS t0, least(start_date + INTERVAL '24' HOUR, end_date) AS t_eval
+  FROM datascope_gestor_prod.episodes WHERE patient_ref IN (SELECT patient_ref FROM cohorte) AND episode_type_ref IN ('HOSP', 'HOSP_IQ')
+),
+rc_num AS (
+  SELECT a.episode_ref AS ep_rc_num,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'FC') AS v000,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v001,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v002,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v003,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v004,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v005,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v006,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v007,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'FR') AS v008,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v009,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v010,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v011,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v012,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v013,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v014,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v015,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v016,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v017,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v018,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v019
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND r.result_num IS NOT NULL AND r.rc_sap_ref IN ('FC', 'FR', 'PULSIOX', 'TAS', 'TEMP') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+rc_cat AS (
+  SELECT a.episode_ref AS ep_rc_cat,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_1' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v032,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_2' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v033,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_3' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v034
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND r.rc_sap_ref IN ('ESTADO_CONCIENC') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+lab AS (
+  SELECT a.episode_ref AS ep_lab,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2467') AS v020,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2467') AS v021,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB110') AS v022,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB110') AS v023,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LABRPAK') AS v024,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABRPAK') AS v025,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB1300') AS v026,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB1300') AS v027,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v028,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v029,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v030,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v031
+  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref AND l.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND l.result_num IS NOT NULL AND l.lab_sap_ref IN ('LAB110', 'LAB1300', 'LAB2467', 'LAB2575', 'LABHBST', 'LABRPAK') AND l.extrac_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+vars AS (
+  SELECT a.patient_ref, a.episode_ref, a.t0, a.t_eval,
+         -- FC_last
+         CAST(v000 AS double) AS v000,
+         -- FC_mean
+         CAST(v001 AS double) AS v001,
+         -- FC_min
+         CAST(v002 AS double) AS v002,
+         -- FC_max
+         CAST(v003 AS double) AS v003,
+         -- TAS_last
+         CAST(v004 AS double) AS v004,
+         -- TAS_mean
+         CAST(v005 AS double) AS v005,
+         -- TAS_min
+         CAST(v006 AS double) AS v006,
+         -- TAS_max
+         CAST(v007 AS double) AS v007,
+         -- FR_last
+         CAST(v008 AS double) AS v008,
+         -- FR_mean
+         CAST(v009 AS double) AS v009,
+         -- FR_min
+         CAST(v010 AS double) AS v010,
+         -- FR_max
+         CAST(v011 AS double) AS v011,
+         -- TEMP_last
+         CAST(v012 AS double) AS v012,
+         -- TEMP_mean
+         CAST(v013 AS double) AS v013,
+         -- TEMP_min
+         CAST(v014 AS double) AS v014,
+         -- TEMP_max
+         CAST(v015 AS double) AS v015,
+         -- PULSIOX_last
+         CAST(v016 AS double) AS v016,
+         -- PULSIOX_mean
+         CAST(v017 AS double) AS v017,
+         -- PULSIOX_min
+         CAST(v018 AS double) AS v018,
+         -- PULSIOX_max
+         CAST(v019 AS double) AS v019,
+         -- LAB2467_last
+         CAST(v020 AS double) AS v020,
+         -- LAB2467_max
+         CAST(v021 AS double) AS v021,
+         -- LAB110_last
+         CAST(v022 AS double) AS v022,
+         -- LAB110_max
+         CAST(v023 AS double) AS v023,
+         -- LABRPAK_last
+         CAST(v024 AS double) AS v024,
+         -- LABRPAK_max
+         CAST(v025 AS double) AS v025,
+         -- LAB1300_last
+         CAST(v026 AS double) AS v026,
+         -- LAB1300_max
+         CAST(v027 AS double) AS v027,
+         -- LABHBST_last
+         CAST(v028 AS double) AS v028,
+         -- LABHBST_max
+         CAST(v029 AS double) AS v029,
+         -- LAB2575_last
+         CAST(v030 AS double) AS v030,
+         -- LAB2575_max
+         CAST(v031 AS double) AS v031,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_1_last
+         CAST(v032 AS double) AS v032,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_2_last
+         CAST(v033 AS double) AS v033,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_3_last
+         CAST(v034 AS double) AS v034,
+         -- age
+         CAST(CAST(date_diff('day', CAST(d.birth_date AS timestamp(3)), a.t_eval) AS double) / 365.25E0 AS double) AS v035,
+         -- sex_2
+         CAST(CASE WHEN d.sex IS NULL THEN NULL WHEN d.sex = 2 THEN 1E0 ELSE 0E0 END AS double) AS v036
+  FROM adm a
+  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref IN (SELECT patient_ref FROM cohorte)
+  LEFT JOIN rc_num ON rc_num.ep_rc_num = a.episode_ref
+  LEFT JOIN rc_cat ON rc_cat.ep_rc_cat = a.episode_ref
+  LEFT JOIN lab ON lab.ep_lab = a.episode_ref
+),
+pesos AS (  -- pesos (una fila por neurona) y sesgos de cada capa, en binario float32
+  SELECT transform(sequence(0, 31), k -> transform(sequence(0, 39), j -> from_ieee754_32(substr(bw1, 4 * (k * 40 + j) + 1, 4)))) AS w1, transform(sequence(0, 31), i -> from_ieee754_32(substr(bb1, 4 * i + 1, 4))) AS b1, transform(sequence(0, 0), k -> transform(sequence(0, 31), j -> from_ieee754_32(substr(bw2, 4 * (k * 32 + j) + 1, 4)))) AS w2, transform(sequence(0, 0), i -> from_ieee754_32(substr(bb2, 4 * i + 1, 4))) AS b2
+  FROM (SELECT from_base64('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') AS bw1, from_base64('PQu5+T2GLLo9zNhcvqlzY73hnnO9Jg63vjh/mLziO0a+VZhjvkHmUr3hjte+IgKUvFzJAT4sJr0+bSxqvmDI/75zDhe+FpYVPSYvST2RuB++W/mKPkuSBL6eHOe80yCQPjZI8T4no3Y+N5moPmvta70SV6E+fEq0vpWIpT4058o=') AS bb1, from_base64('vA4Sej5jmsO9y3tiPaSJ5bzDPvc+GpO4vtKuoL7e7eK+jhLDvq9J7z6K/4y+k51uPreIR75HcS++p+zmPlPiRj2+OnK9gmb7uyuTtz4S+lG+k1/7PsGg/T64Ozw9pXb/vqFw0j3Wzzq+1q3rvupdLr6HNcS9tmSaPopEwT4WCvA=') AS bw2, from_base64('PhxeTQ==') AS bb2)
+),
+x0 AS (SELECT patient_ref, episode_ref, t0, t_eval, ARRAY[((coalesce(v000, 8.6000000000000000E+01) - 8.5884750366210938E+01) / 1.3427047729492188E+01), ((coalesce(v001, 8.8833335876464844E+01) - 8.8107704162597656E+01) / 1.1131155014038086E+01), ((coalesce(v002, 7.8000000000000000E+01) - 7.6865539550781250E+01) / 1.1798424720764160E+01), ((coalesce(v003, 1.0000000000000000E+02) - 9.9341529846191406E+01) / 1.2831623077392578E+01), ((coalesce(v004, 1.3100000000000000E+02) - 1.3169535827636719E+02) / 1.9520858764648438E+01), ((coalesce(v005, 1.3233332824707031E+02) - 1.3139857482910156E+02) / 1.7242010116577148E+01), ((coalesce(v006, 1.1800000000000000E+02) - 1.1658778381347656E+02) / 2.0546815872192383E+01), ((coalesce(v007, 1.4600000000000000E+02) - 1.4572262573242188E+02) / 1.8752771377563477E+01), ((coalesce(v008, 1.9000000000000000E+01) - 1.8622358322143555E+01) / 3.6688604354858398E+00), ((coalesce(v009, 1.9000000000000000E+01) - 1.9065727233886719E+01) / 3.5281665325164795E+00), ((coalesce(v010, 1.7000000000000000E+01) - 1.6567422866821289E+01) / 3.5326759815216064E+00), ((coalesce(v011, 2.2000000000000000E+01) - 2.1582788467407227E+01) / 3.9165766239166260E+00), ((coalesce(v012, 3.6700000762939453E+01) - 3.6837379455566406E+01) / 6.3843864202499390E-01), ((coalesce(v013, 3.6674999237060547E+01) - 3.6905372619628906E+01) / 6.4792788028717041E-01), ((coalesce(v014, 3.6299999237060547E+01) - 3.6518978118896484E+01) / 6.3925933837890625E-01), ((coalesce(v015, 3.7099998474121094E+01) - 3.7287437438964844E+01) / 7.0976376533508301E-01), ((coalesce(v016, 9.5000000000000000E+01) - 9.4956207275390625E+01) / 4.0869817733764648E+00), ((coalesce(v017, 9.5333335876464844E+01) - 9.4709121704101562E+01) / 2.9631731510162354E+00), ((coalesce(v018, 9.4000000000000000E+01) - 9.2625045776367188E+01) / 7.5527610778808594E+00), ((coalesce(v019, 9.7000000000000000E+01) - 9.6417213439941406E+01) / 2.6078658103942871E+00), ((coalesce(v020, 1.0700000524520874E+00) - 1.1651709079742432E+00) / 5.7236963510513306E-01), ((coalesce(v021, 1.1499999761581421E+00) - 1.2414137125015259E+00) / 6.2797355651855469E-01), ((coalesce(v022, 4.5000000000000000E+01) - 4.8534000396728516E+01) / 2.1737615585327148E+01), ((coalesce(v023, 4.8000000000000000E+01) - 5.2358047485351562E+01) / 2.4840066909790039E+01), ((coalesce(v024, 4.3000001907348633E+00) - 4.3343834877014160E+00) / 4.3777310848236084E-01), ((coalesce(v025, 4.4000000953674316E+00) - 4.4074530601501465E+00) / 4.6693819761276245E-01), ((coalesce(v026, 8.3999996185302734E+00) - 9.0329999923706055E+00) / 3.2154924869537354E+00), ((coalesce(v027, 8.8999996185302734E+00) - 9.8543214797973633E+00) / 3.7153511047363281E+00), ((coalesce(v028, 1.2300000190734863E+01) - 1.2350134849548340E+01) / 1.7055633068084717E+00), ((coalesce(v029, 1.2500000000000000E+01) - 1.2531847953796387E+01) / 1.7161175012588501E+00), ((coalesce(v030, 2.3200000762939453E+01) - 4.7281444549560547E+01) / 5.3022598266601562E+01), ((coalesce(v031, 3.6000000000000000E+01) - 6.0549175262451172E+01) / 6.4640861511230469E+01), ((coalesce(v032, 0.0000000000000000E+00) - 3.7456780672073364E-01) / 4.8401111364364624E-01), ((coalesce(v033, 0.0000000000000000E+00) - 3.2616212964057922E-01) / 4.6880742907524109E-01), ((coalesce(v034, 0.0000000000000000E+00) - 5.8778334408998489E-02) / 2.3520936071872711E-01), ((coalesce(v035, 7.6514717102050781E+01) - 7.2619750976562500E+01) / 1.7708871841430664E+01), ((coalesce(v036, 1.0000000000000000E+00) - 5.6703805923461914E-01) / 4.9548551440238953E-01), (((CASE WHEN v032 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01), (((CASE WHEN v033 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01), (((CASE WHEN v034 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01)] AS x FROM vars),
+x1 AS (
+  SELECT v.patient_ref, v.episode_ref, v.t0, v.t_eval,
+         zip_with(p.w1, p.b1, (w, b) -> greatest(0E0, reduce(zip_with(w, v.x, (p, e) -> p * e), 0E0, (s, t) -> s + t, s -> s) + b)) AS x
+  FROM x0 v CROSS JOIN pesos p
+),
+x2 AS (
+  SELECT v.patient_ref, v.episode_ref, v.t0, v.t_eval,
+         zip_with(p.w2, p.b2, (w, b) -> reduce(zip_with(w, v.x, (p, e) -> p * e), 0E0, (s, t) -> s + t, s -> s) + b) AS x
+  FROM x1 v CROSS JOIN pesos p
+),
+nucleo AS (
+  SELECT patient_ref, episode_ref, t0, t_eval, 1E0 / (1E0 + exp(-element_at(x, 1))) AS probabilidad FROM x2
+)
+SELECT patient_ref, episode_ref, t0 AS ingreso, t_eval AS momento, probabilidad
+FROM nucleo
+ORDER BY patient_ref, ingreso

@@ -143,12 +143,49 @@ def _agregado(val, t, est):
             "std": f"stddev_samp({val})", "min": f"min({val})", "max": f"max({val})", "count": f"count({val})"}[est]
 
 
-def sql_variables(variables, contrato, pids=None):
+HASH_MULT, HASH_MOD = 2654435761, 2 ** 32  # hash multiplicativo de Knuth: patient_ref -> [0, 2^32)
+
+
+def hash_sql(col, semilla=0):
+    """Hash de patient_ref en [0, 2^32) sin desbordar bigint con cualquier patient_ref (mod 2^31 antes de multiplicar);
+    para patient_ref < 2^31 es (patient_ref * 2654435761 + desplazamiento) mod 2^32. Mismo cálculo que hash_py."""
+    d = (semilla * 2246822519) % HASH_MOD
+    return f"mod(mod({col}, 2147483648) * {HASH_MULT}" + (f" + {d}" if d else "") + f", {HASH_MOD})"
+
+
+def hash_py(pids, semilla=0):
+    pids = np.asarray(pids, dtype=np.int64)
+    return ((pids % 2147483648) * HASH_MULT + (semilla * 2246822519) % HASH_MOD) % HASH_MOD
+
+
+@dataclass(frozen=True)
+class Cohorte:
+    """Pacientes elegidos dentro de la consulta: los `pacientes` primeros por el hash de patient_ref (con `semilla`) entre
+    los que tienen algún ingreso HOSP / HOSP_IQ. Determinista mientras la base no cambie (DataNex)."""
+    pacientes: int
+    semilla: int = 0
+
+    def cte(self):
+        return (f"cohorte AS (  -- {self.pacientes} pacientes al azar (hash de patient_ref, semilla {self.semilla}) con algún "
+                f"ingreso {' / '.join(C.TIPOS_INGRESO)}\n"
+                f"  SELECT patient_ref FROM (SELECT DISTINCT patient_ref FROM {C.ESQUEMA}.episodes\n"
+                f"                           WHERE episode_type_ref IN ({', '.join(map(q, C.TIPOS_INGRESO))}))\n"
+                f"  ORDER BY {hash_sql('patient_ref', self.semilla)}, patient_ref LIMIT {int(self.pacientes)}\n)")
+
+
+def _filtro(pids, cohorte):
+    if cohorte is not None:
+        return "IN (SELECT patient_ref FROM cohorte)"
+    return f"IN ({', '.join(map(str, pids))})" if pids else C.BASE
+
+
+def sql_variables(variables, contrato, pids=None, cohorte=None):
     """CTE `vars`: una fila por ingreso con las variables del modelo en columnas v000, v001... (en su orden).
 
     pids: lista de patient_ref, o None para toda la base original. Cada tabla se filtra por paciente, así que solo se
-    leen sus filas; un filtro por patient_ref no dispara el crecimiento automático de FakeNex."""
-    filtro = f"IN ({', '.join(map(str, pids))})" if pids else C.BASE
+    leen sus filas; un filtro por patient_ref no dispara el crecimiento automático de FakeNex.
+    cohorte: Cohorte (los pacientes se eligen dentro de la consulta, p. ej. en DataNex); tiene prioridad sobre pids."""
+    filtro = _filtro(pids, cohorte)
     S, mo, ve = C.ESQUEMA, contrato.momento_horas, contrato.ventana_horas
     win = lambda t: f"{t} BETWEEN a.t_eval - INTERVAL '{ve}' HOUR AND a.t_eval"
     rc_num, rc_cat, lab, fuera = [], [], [], []
@@ -161,7 +198,7 @@ def sql_variables(variables, contrato, pids=None):
         elif v.fuente == "rc_codigo":
             ind = f"CASE WHEN r.result_txt = {q(v.valor)} THEN 1E0 ELSE 0E0 END"
             rc_cat.append(f"{_agregado(ind, 'r.result_date', v.estadistico)} FILTER (WHERE r.rc_sap_ref = {q(v.codigo)}) AS {c}")
-    ctes = [f"""adm AS (  -- ingresos; momento de evaluación = inicio + {mo} h (o el alta si es antes)
+    ctes = ([cohorte.cte()] if cohorte is not None else []) + [f"""adm AS (  -- ingresos; momento de evaluación = inicio + {mo} h (o el alta si es antes)
   SELECT patient_ref, episode_ref, start_date AS t0, least(start_date + INTERVAL '{mo}' HOUR, end_date) AS t_eval
   FROM {S}.episodes WHERE patient_ref {filtro} AND episode_type_ref IN ({', '.join(map(q, C.TIPOS_INGRESO))})
 )"""]
@@ -207,9 +244,9 @@ def lit(x):
     return f"{float(x):.16E}"
 
 
-def sql_etiqueta(pids=None):
+def sql_etiqueta(pids=None, cohorte=None):
     """CTE `etiqueta`: muerte durante el ingreso (alta por exitus, adm_disch mot_ref 23). Solo para practicar."""
-    filtro = f"IN ({', '.join(map(str, pids))})" if pids else C.BASE
+    filtro = _filtro(pids, cohorte)
     return (f"etiqueta AS (SELECT episode_ref AS ep_et, max(CASE WHEN mot_ref = 23 THEN 1 ELSE 0 END) AS muere\n"
             f"  FROM {C.ESQUEMA}.adm_disch WHERE patient_ref {filtro} AND mot_type = 'END' GROUP BY episode_ref)")
 

@@ -60,9 +60,10 @@ def _expresiones(doc):
     return ex
 
 
-def compilar(doc, pids, tipo="auto", forzar=False, precision=None):
+def compilar(doc, pids, tipo="auto", forzar=False, precision=None, cohorte=None):
     """(sql, info) para los pacientes `pids`. tipo: "auto" (el primero admitido) o uno de TIPOS[núcleo].
-    precision: "float32" (por defecto, config.PRECISION), "float64" o "int8"."""
+    precision: "float32" (por defecto, config.PRECISION), "float64" o "int8". cohorte: contrato.Cohorte (pacientes
+    elegidos dentro de la consulta, en lugar de la lista pids)."""
     nuc = doc["nucleo"]
     tipo = TIPOS[nuc["tipo"]][0] if tipo in (None, "auto") else tipo
     if tipo not in TIPOS[nuc["tipo"]]:
@@ -75,7 +76,7 @@ def compilar(doc, pids, tipo="auto", forzar=False, precision=None):
     cab = (f"-- {dq['modelo']['nombre']} ({dq['modelo'].get('clase', '')}), núcleo {nuc['tipo']} / {tipo}, {precision}; "
            "generado por fnxsql\n-- desde el documento if-then: una fila por ingreso con la probabilidad del modelo.\n")
     cuerpo, info = {"puntuacion": _puntuacion, "arboles": _arboles, "red": _red}[nuc["tipo"]](dq, ex, tipo, precision)
-    sql = cab + sql_variables(variables, contrato, pids) + ",\n" + cuerpo
+    sql = cab + sql_variables(variables, contrato, pids, cohorte) + ",\n" + cuerpo
     info.update({"tipo_sql": tipo, "precision": precision, "bytes": len(sql.encode("utf-8"))})
     if info["bytes"] > C.MAX_SQL_BYTES_FAKENEX or (info["bytes"] > C.MAX_SQL_BYTES and not forzar):
         raise SQLDemasiadoGrande(

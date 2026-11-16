@@ -15,3 +15,5 @@ venv/
 .pytest_cache/
 # registros de ejecuciones largas
 salidas_*.log
+# resultados de DataNex: datos reales y modelos entrenados con ellos (no subir)
+datanex/resultados/

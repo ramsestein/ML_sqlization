@@ -193,16 +193,20 @@ def sql_bucle(J, p, arboles):
     caso = "CASE (it - 1) % " + str(P) + "".join(f"\n      WHEN {k} THEN {rama(v)}" for k, v in sorted(ramas.items())) + " END"
     inicio = _estado(f="f0e", ft="f0p", **{n: (VACIOS.get(n) or f"CAST(ARRAY[] AS {t})") for n, t in CAMPOS if n not in ("f", "ft")})
     inicio = inicio.replace("st.", "")
-    salida = (f"st -> ROW(st.arb, st.perd || ARRAY[CAST(ROW({_perdida('st.f', 'ye')}, {_perdida('st.ft', 'yp')}) "
-              "AS ROW(e double, p double))])")
+    # campos con nombre: una ROW anónima se serializa a JSON con claves vacías repetidas ({"": ..., "": ...})
+    salida = (f"st -> CAST(ROW(st.arb, st.perd || ARRAY[CAST(ROW({_perdida('st.f', 'ye')}, {_perdida('st.ft', 'yp')}) "
+              f"AS ROW(e double, p double))]) AS ROW(arb array({ARB}), perd array(ROW(e double, p double))))")
     return f"reduce(sequence(1, {arboles * P}), {inicio},\n  (st, it) -> {caso},\n  {salida})"
 
 
-def sql_entrenar(variables, contrato, p, arboles, previo=None):
-    """La consulta. previo = None (primera: calcula los cortes) o (cortes, margen, árboles hechos en formato if-then)."""
+def sql_entrenar(variables, contrato, p, arboles, previo=None, cohorte=None):
+    """La consulta. previo = None (primera: calcula los cortes) o (cortes, margen, árboles hechos en formato if-then).
+    cohorte: contrato.Cohorte (pacientes elegidos dentro de la consulta, p. ej. en DataNex); None = base original de FakeNex.
+    Devuelve UNA fila con n, n_prueba, positivos, m0 y, como texto JSON (para que quepa en un CSV de Athena), cortes_json,
+    kv_json y resultado_json = {"arb": [árbol por nodos en anchura...], "perd": [{"e", "p"} por número de árboles]}."""
     J = len(variables)
     nombres = [v.nombre for v in variables]
-    base = E.sql_base(variables, contrato, p)
+    base = E.sql_base(variables, contrato, p, cohorte)
     x = "ARRAY[" + ", ".join(f"CAST(v{i:03d} AS real)" for i in range(J)) + "]"
     vacio_d, vacio_x = "CAST(ARRAY[] AS array(double))", "CAST(ARRAY[] AS array(array(real)))"
     agg = lambda filtro, col, vacio: f"coalesce(array_agg({col} ORDER BY episode_ref) FILTER (WHERE {filtro}), {vacio})"
@@ -246,8 +250,10 @@ def sql_entrenar(variables, contrato, p, arboles, previo=None):
     bins = lambda xs: (f"transform(sequence(1, {J}), j -> transform({xs}, xx -> coalesce(width_bucket(CAST(element_at(xx, j) AS double), "
                        "element_at(c, j)), -1)))")
     cuerpo += f"         {bins('xe')} AS be,\n         {bins('xp')} AS bp\n  FROM {fuente})\n"
-    final = ("SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, (s, v) -> s + v, s -> s) AS positivos, "
-             f"m0, c, kv,\n       {sql_bucle(J, p, arboles)} AS r\nFROM dat")
+    final = ("SELECT n, n_prueba, positivos, CAST(m0 AS double) AS m0, json_format(CAST(c AS JSON)) AS cortes_json,\n"
+             "       json_format(CAST(kv AS JSON)) AS kv_json, json_format(CAST(r AS JSON)) AS resultado_json\n"
+             "FROM (SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, (s, v) -> s + v, s -> s) AS positivos, "
+             f"m0, c, kv,\n       {sql_bucle(J, p, arboles)} AS r\nFROM dat)")
     return base + cuerpo + final
 
 
@@ -263,41 +269,90 @@ def _arbol_doc(feat, bins, izq, val, gs, hes, gan, cnt, cortes, nombres, p, k=0)
                      "peso": f32(-p.eta * float(gs[k]) / (float(hes[k]) + p.lambda_))}}
 
 
-def entrenar(nombres, contrato=None, p=None, arboles_por_consulta=None, forzar=False, aviso=E._aviso):
-    """Entrena con UNA consulta (o unas pocas, si arboles_por_consulta < p.arboles). Mismo resultado que entrenar.entrenar
-    salvo los cortes (approx_percentile no es determinista entre ejecuciones)."""
-    contrato, p = contrato or K.Contrato(), p or E.Parametros()
-    variables, errores = K.variables_del_modelo(nombres, contrato)
+def _lista(x):
+    """Una ROW serializada a JSON llega como objeto (Trino reciente) o como array (versiones anteriores): siempre lista."""
+    return list(x.values()) if isinstance(x, dict) else list(x)
+
+
+def leer_fila(fila):
+    """Resultado de una consulta de entrenamiento (dict columna -> valor, de la API de Trino o de un CSV de Athena):
+    (n, n_prueba, positivos, m0, cortes, kv, árboles como listas por nodo, pérdidas [(entrenamiento, prueba)])."""
+    import json
+    js = lambda k: json.loads(fila[k]) if isinstance(fila[k], str) else fila[k]
+    r = js("resultado_json")
+    arb, perd = (r["arb"], r["perd"]) if isinstance(r, dict) else r
+    return (int(fila["n"]), int(fila["n_prueba"]), float(fila["positivos"]), float(fila["m0"]), js("cortes_json"),
+            js("kv_json"), [_lista(a) for a in arb], [tuple(map(float, _lista(q))) for q in perd])
+
+
+# ------------------------------------------------------------------ estado de un entrenamiento por tandas (automático o a mano)
+def nuevo_estado(nombres, contrato, p, arboles_por_consulta=None, cohorte=None):
+    """Estado serializable (JSON) de un entrenamiento: con él se genera cada consulta y se incorpora su resultado."""
+    from dataclasses import asdict
+    return {"nombres": list(nombres), "contrato": contrato.a_dict(), "parametros": asdict(p),
+            "arboles_por_consulta": arboles_por_consulta or p.arboles,
+            "cohorte": None if cohorte is None else asdict(cohorte), "cortes": None, "margen": None, "tasa": None,
+            "ingresos": None, "arboles": [], "historial": [], "perdidas_por_consulta": [], "consultas": []}
+
+
+def _piezas(estado):
+    p = E.Parametros(**estado["parametros"])
+    contrato = K.Contrato(**estado["contrato"])
+    variables, errores = K.variables_del_modelo(estado["nombres"], contrato)
     if errores:
         raise ValueError("; ".join(errores))
-    por = arboles_por_consulta or p.arboles
-    registro, t0, hechos, historial, previo, info = [], time.time(), [], [], None, None
-    while previo is None or len(hechos) < p.arboles:
-        n_t = min(por, p.arboles - len(hechos))
-        sql = sql_entrenar(variables, contrato, p, n_t, previo)
-        nb = len(sql.encode("utf-8"))
-        if nb > C.MAX_SQL_BYTES and not forzar:
-            raise ValueError(f"consulta de {nb:,} bytes: no cabe en AWS Athena ({C.MAX_SQL_BYTES:,})")
-        df, reloj, st = cliente.ejecutar(sql, max_segundos=MAX_SEGUNDOS)
-        registro.append({"que": f"árboles {len(hechos)}-{len(hechos) + n_t - 1}", "bytes_sql": nb, "filas_devueltas": len(df),
-                         **cliente.resumen_stats(st, reloj)})
-        fila = df.iloc[0]
-        if previo is None:
-            cortes = [list(map(float, c_)) if k_ else [] for c_, k_ in zip(fila["c"], fila["kv"])]
-            tasa = f32(float(fila["positivos"]) / int(fila["n"]))
-            margen = f32(float(fila["m0"]))
-            info = {"entrenamiento": int(fila["n"]), "prueba": int(fila["n_prueba"]), "positivos": float(fila["positivos"])}
-        arbs, perd = fila["r"]
-        cortes_doc = [c_ or [0.0] for c_ in cortes]
-        for a in arbs:
-            hechos.append(_arbol_doc(*a, cortes_doc, nombres, p))
-        nuevos = [{"arboles": len(historial) + i, "perdida_entrenamiento": float(e), "perdida_prueba": float(q_)}
-                  for i, (e, q_) in enumerate(perd[:-1])]
-        historial += nuevos
-        aviso(f"  consulta {len(registro)}: {len(hechos)} árboles en {reloj:.1f} s (servidor {registro[-1]['servidor_s']} s, "
-              f"{nb / 1024:.0f} KB); pérdida entrenamiento {float(perd[-1][0]):.5f}, prueba {float(perd[-1][1]):.5f}")
-        previo = (cortes, margen, list(hechos))
-    historial.append({"arboles": len(hechos), "perdida_entrenamiento": float(perd[-1][0]), "perdida_prueba": float(perd[-1][1])})
+    cohorte = K.Cohorte(**estado["cohorte"]) if estado["cohorte"] else None
+    return p, contrato, variables, cohorte
+
+
+def terminado(estado):
+    return estado["cortes"] is not None and len(estado["arboles"]) >= estado["parametros"]["arboles"]
+
+
+def siguiente_consulta(estado):
+    """(sql, número de árboles que entrena) de la próxima tanda; None si ya están todos."""
+    if terminado(estado):
+        return None
+    p, contrato, variables, cohorte = _piezas(estado)
+    n_t = min(estado["arboles_por_consulta"], p.arboles - len(estado["arboles"]))
+    previo = None if estado["cortes"] is None else (estado["cortes"], estado["margen"], estado["arboles"])
+    return sql_entrenar(variables, contrato, p, n_t, previo, cohorte), n_t
+
+
+def incorporar(estado, fila, registro=None):
+    """Añade al estado el resultado (una fila) de la última consulta. Comprueba que la cohorte es la misma y que la
+    pérdida con la que empieza esta tanda es la que dejó la anterior (el margen se recalcula bien en el servidor)."""
+    p, _, _, _ = _piezas(estado)
+    n, n_p, positivos, m0, cortes, kv, arbs, perd = leer_fila(fila)
+    avisos = []
+    if estado["cortes"] is None:
+        estado["cortes"] = [list(map(float, c_)) if k_ else [] for c_, k_ in zip(cortes, kv)]
+        estado["tasa"], estado["margen"] = f32(positivos / n), f32(m0)
+        estado["ingresos"] = {"entrenamiento": n, "prueba": n_p, "positivos": positivos}
+    else:
+        if (n, n_p, positivos) != (estado["ingresos"]["entrenamiento"], estado["ingresos"]["prueba"], estado["ingresos"]["positivos"]):
+            raise ValueError(f"la cohorte ha cambiado entre consultas: {n} / {n_p} ingresos y {positivos} positivos frente a "
+                             f"{estado['ingresos']}; ¿es el CSV de la consulta que tocaba?")
+        anterior = estado["perdidas_por_consulta"][-1][-1]
+        d = max(abs(perd[0][0] - anterior[0]), abs(perd[0][1] - anterior[1]) if not math.isnan(anterior[1]) else 0.0)
+        if d > 1e-9:
+            avisos.append(f"la pérdida inicial de esta tanda difiere de la final de la anterior en {d:.1e}")
+    cd = [c_ or [0.0] for c_ in estado["cortes"]]
+    for a in arbs:
+        estado["arboles"].append(_arbol_doc(*a, cd, estado["nombres"], p))
+    estado["historial"] += [{"arboles": len(estado["historial"]) + i, "perdida_entrenamiento": e, "perdida_prueba": q_}
+                            for i, (e, q_) in enumerate(perd[:-1])]
+    estado["perdidas_por_consulta"].append([list(x) for x in perd])
+    estado["consultas"].append(registro or {})
+    return avisos
+
+
+def resultado(estado):
+    """Modelo final (documento if-then y JSON de XGBoost) desde un estado terminado."""
+    p, contrato, variables, _ = _piezas(estado)
+    hechos, historial = list(estado["arboles"]), list(estado["historial"])
+    e, q_ = estado["perdidas_por_consulta"][-1][-1]
+    historial.append({"arboles": len(hechos), "perdida_entrenamiento": e, "perdida_prueba": q_})
     if p.paciencia:  # parada temprana a posteriori, con la misma regla que entrenar.crecer (la consulta da la pérdida por árbol)
         mejor = (math.inf, 0)
         for h in historial:
@@ -305,13 +360,37 @@ def entrenar(nombres, contrato=None, p=None, arboles_por_consulta=None, forzar=F
                 mejor = (h["perdida_prueba"], h["arboles"])
             if h["arboles"] - mejor[1] >= p.paciencia:
                 break
-        if mejor[1] < len(hechos):
-            aviso(f"  parada temprana: el mejor fue con {mejor[1]} árboles")
-            hechos, historial = hechos[:mejor[1]], historial[:mejor[1] + 1]
-    doc = E.documento(hechos, margen, variables, contrato, "boosting_sql", p)
-    return {"documento": doc, "xgboost": E.a_xgboost(doc, tasa), "cortes": cortes, "tasa": tasa, "margen": margen,
-            "historial": historial, "consultas": registro, "segundos": time.time() - t0,
-            "ingresos": {**info, "pacientes": None}}
+        hechos, historial = hechos[:mejor[1]], historial[:mejor[1] + 1]
+    doc = E.documento(hechos, estado["margen"], variables, contrato, "boosting_sql", p)
+    return {"documento": doc, "xgboost": E.a_xgboost(doc, estado["tasa"]), "cortes": estado["cortes"], "tasa": estado["tasa"],
+            "margen": estado["margen"], "historial": historial, "consultas": estado["consultas"],
+            "ingresos": {**estado["ingresos"], "pacientes": None}}
+
+
+def entrenar(nombres, contrato=None, p=None, arboles_por_consulta=None, forzar=False, aviso=E._aviso, cohorte=None):
+    """Entrena con UNA consulta (o unas pocas, si arboles_por_consulta < p.arboles) contra FakeNex. Mismo resultado que
+    entrenar.entrenar salvo los cortes (approx_percentile no es determinista entre ejecuciones)."""
+    contrato, p = contrato or K.Contrato(), p or E.Parametros()
+    estado, t0 = nuevo_estado(nombres, contrato, p, arboles_por_consulta, cohorte), time.time()
+    while not terminado(estado):
+        sql, n_t = siguiente_consulta(estado)
+        nb = len(sql.encode("utf-8"))
+        if nb > C.MAX_SQL_BYTES and not forzar:
+            raise ValueError(f"consulta de {nb:,} bytes: no cabe en AWS Athena ({C.MAX_SQL_BYTES:,})")
+        df, reloj, st = cliente.ejecutar(sql, max_segundos=MAX_SEGUNDOS)
+        hechos = len(estado["arboles"])
+        reg = {"que": f"árboles {hechos}-{hechos + n_t - 1}", "bytes_sql": nb, "filas_devueltas": len(df),
+               **cliente.resumen_stats(st, reloj)}
+        for a in incorporar(estado, df.iloc[0].to_dict(), reg):
+            aviso(f"  AVISO: {a}")
+        e, q_ = estado["perdidas_por_consulta"][-1][-1]
+        aviso(f"  consulta {len(estado['consultas'])}: {len(estado['arboles'])} árboles en {reloj:.1f} s (servidor "
+              f"{reg['servidor_s']} s, {nb / 1024:.0f} KB); pérdida entrenamiento {e:.5f}, prueba {q_:.5f}")
+    res = resultado(estado)
+    if len(res["documento"]["nucleo"]["arboles"]) < len(estado["arboles"]):
+        aviso(f"  parada temprana: el mejor fue con {len(res['documento']['nucleo']['arboles'])} árboles")
+    res["segundos"] = time.time() - t0
+    return res
 
 
 # ------------------------------------------------------------------ las mismas cuentas en numpy (verificación bit a bit)

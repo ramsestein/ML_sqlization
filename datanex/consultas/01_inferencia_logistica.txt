@@ -1,0 +1,198 @@
+-- Inferencia: logistica (LogisticRegression) para los ingresos de 10 pacientes al azar
+-- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en
+-- datanex/resultados/01_inferencia_logistica.csv
+-- logistica (LogisticRegression), núcleo puntuacion / terminos, float32; generado por fnxsql
+-- desde el documento if-then: una fila por ingreso con la probabilidad del modelo.
+WITH
+cohorte AS (  -- 10 pacientes al azar (hash de patient_ref, semilla 1) con algún ingreso HOSP / HOSP_IQ
+  SELECT patient_ref FROM (SELECT DISTINCT patient_ref FROM datascope_gestor_prod.episodes
+                           WHERE episode_type_ref IN ('HOSP', 'HOSP_IQ'))
+  ORDER BY mod(mod(patient_ref, 2147483648) * 2654435761 + 2246822519, 4294967296), patient_ref LIMIT 10
+),
+adm AS (  -- ingresos; momento de evaluación = inicio + 24 h (o el alta si es antes)
+  SELECT patient_ref, episode_ref, start_date AS t0, least(start_date + INTERVAL '24' HOUR, end_date) AS t_eval
+  FROM datascope_gestor_prod.episodes WHERE patient_ref IN (SELECT patient_ref FROM cohorte) AND episode_type_ref IN ('HOSP', 'HOSP_IQ')
+),
+rc_num AS (
+  SELECT a.episode_ref AS ep_rc_num,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'FC') AS v000,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v001,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v002,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FC') AS v003,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v004,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v005,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v006,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TAS') AS v007,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'FR') AS v008,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v009,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v010,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'FR') AS v011,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v012,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v013,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v014,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'TEMP') AS v015,
+         max_by(r.result_num, r.result_date) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v016,
+         avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v017,
+         min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v018,
+         max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v019
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND r.result_num IS NOT NULL AND r.rc_sap_ref IN ('FC', 'FR', 'PULSIOX', 'TAS', 'TEMP') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+rc_cat AS (
+  SELECT a.episode_ref AS ep_rc_cat,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_1' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v032,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_2' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v033,
+         max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_3' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v034
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND r.rc_sap_ref IN ('ESTADO_CONCIENC') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+lab AS (
+  SELECT a.episode_ref AS ep_lab,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2467') AS v020,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2467') AS v021,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB110') AS v022,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB110') AS v023,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LABRPAK') AS v024,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABRPAK') AS v025,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB1300') AS v026,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB1300') AS v027,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v028,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v029,
+         max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v030,
+         max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v031
+  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref AND l.patient_ref IN (SELECT patient_ref FROM cohorte)
+   AND l.result_num IS NOT NULL AND l.lab_sap_ref IN ('LAB110', 'LAB1300', 'LAB2467', 'LAB2575', 'LABHBST', 'LABRPAK') AND l.extrac_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
+  GROUP BY a.episode_ref
+),
+vars AS (
+  SELECT a.patient_ref, a.episode_ref, a.t0, a.t_eval,
+         -- FC_last
+         CAST(v000 AS double) AS v000,
+         -- FC_mean
+         CAST(v001 AS double) AS v001,
+         -- FC_min
+         CAST(v002 AS double) AS v002,
+         -- FC_max
+         CAST(v003 AS double) AS v003,
+         -- TAS_last
+         CAST(v004 AS double) AS v004,
+         -- TAS_mean
+         CAST(v005 AS double) AS v005,
+         -- TAS_min
+         CAST(v006 AS double) AS v006,
+         -- TAS_max
+         CAST(v007 AS double) AS v007,
+         -- FR_last
+         CAST(v008 AS double) AS v008,
+         -- FR_mean
+         CAST(v009 AS double) AS v009,
+         -- FR_min
+         CAST(v010 AS double) AS v010,
+         -- FR_max
+         CAST(v011 AS double) AS v011,
+         -- TEMP_last
+         CAST(v012 AS double) AS v012,
+         -- TEMP_mean
+         CAST(v013 AS double) AS v013,
+         -- TEMP_min
+         CAST(v014 AS double) AS v014,
+         -- TEMP_max
+         CAST(v015 AS double) AS v015,
+         -- PULSIOX_last
+         CAST(v016 AS double) AS v016,
+         -- PULSIOX_mean
+         CAST(v017 AS double) AS v017,
+         -- PULSIOX_min
+         CAST(v018 AS double) AS v018,
+         -- PULSIOX_max
+         CAST(v019 AS double) AS v019,
+         -- LAB2467_last
+         CAST(v020 AS double) AS v020,
+         -- LAB2467_max
+         CAST(v021 AS double) AS v021,
+         -- LAB110_last
+         CAST(v022 AS double) AS v022,
+         -- LAB110_max
+         CAST(v023 AS double) AS v023,
+         -- LABRPAK_last
+         CAST(v024 AS double) AS v024,
+         -- LABRPAK_max
+         CAST(v025 AS double) AS v025,
+         -- LAB1300_last
+         CAST(v026 AS double) AS v026,
+         -- LAB1300_max
+         CAST(v027 AS double) AS v027,
+         -- LABHBST_last
+         CAST(v028 AS double) AS v028,
+         -- LABHBST_max
+         CAST(v029 AS double) AS v029,
+         -- LAB2575_last
+         CAST(v030 AS double) AS v030,
+         -- LAB2575_max
+         CAST(v031 AS double) AS v031,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_1_last
+         CAST(v032 AS double) AS v032,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_2_last
+         CAST(v033 AS double) AS v033,
+         -- ESTADO_CONCIENC_ESTADO_CONCIENC_3_last
+         CAST(v034 AS double) AS v034,
+         -- age
+         CAST(CAST(date_diff('day', CAST(d.birth_date AS timestamp(3)), a.t_eval) AS double) / 365.25E0 AS double) AS v035,
+         -- sex_2
+         CAST(CASE WHEN d.sex IS NULL THEN NULL WHEN d.sex = 2 THEN 1E0 ELSE 0E0 END AS double) AS v036
+  FROM adm a
+  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref IN (SELECT patient_ref FROM cohorte)
+  LEFT JOIN rc_num ON rc_num.ep_rc_num = a.episode_ref
+  LEFT JOIN rc_cat ON rc_cat.ep_rc_cat = a.episode_ref
+  LEFT JOIN lab ON lab.ep_lab = a.episode_ref
+),
+nucleo AS (
+  SELECT patient_ref, episode_ref, t0, t_eval,
+         1E0 / (1E0 + exp(-(-3.7653906345367432E+00
+           + CASE WHEN ((coalesce(v000, 8.6000000000000000E+01) - 8.5884750366210938E+01) / 1.3427047729492188E+01) IS NOT NULL THEN 5.5552583932876587E-01 * ((coalesce(v000, 8.6000000000000000E+01) - 8.5884750366210938E+01) / 1.3427047729492188E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v001, 8.8833335876464844E+01) - 8.8107704162597656E+01) / 1.1131155014038086E+01) IS NOT NULL THEN -3.8139304518699646E-01 * ((coalesce(v001, 8.8833335876464844E+01) - 8.8107704162597656E+01) / 1.1131155014038086E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v002, 7.8000000000000000E+01) - 7.6865539550781250E+01) / 1.1798424720764160E+01) IS NOT NULL THEN -4.1629806160926819E-01 * ((coalesce(v002, 7.8000000000000000E+01) - 7.6865539550781250E+01) / 1.1798424720764160E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v003, 1.0000000000000000E+02) - 9.9341529846191406E+01) / 1.2831623077392578E+01) IS NOT NULL THEN 3.0032232403755188E-01 * ((coalesce(v003, 1.0000000000000000E+02) - 9.9341529846191406E+01) / 1.2831623077392578E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v004, 1.3100000000000000E+02) - 1.3169535827636719E+02) / 1.9520858764648438E+01) IS NOT NULL THEN -6.1376914381980896E-02 * ((coalesce(v004, 1.3100000000000000E+02) - 1.3169535827636719E+02) / 1.9520858764648438E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v005, 1.3233332824707031E+02) - 1.3139857482910156E+02) / 1.7242010116577148E+01) IS NOT NULL THEN 6.7299574613571167E-02 * ((coalesce(v005, 1.3233332824707031E+02) - 1.3139857482910156E+02) / 1.7242010116577148E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v006, 1.1800000000000000E+02) - 1.1658778381347656E+02) / 2.0546815872192383E+01) IS NOT NULL THEN -1.9757255911827087E-01 * ((coalesce(v006, 1.1800000000000000E+02) - 1.1658778381347656E+02) / 2.0546815872192383E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v007, 1.4600000000000000E+02) - 1.4572262573242188E+02) / 1.8752771377563477E+01) IS NOT NULL THEN 6.6310590505599976E-01 * ((coalesce(v007, 1.4600000000000000E+02) - 1.4572262573242188E+02) / 1.8752771377563477E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v008, 1.9000000000000000E+01) - 1.8622358322143555E+01) / 3.6688604354858398E+00) IS NOT NULL THEN 7.7652770280838013E-01 * ((coalesce(v008, 1.9000000000000000E+01) - 1.8622358322143555E+01) / 3.6688604354858398E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v009, 1.9000000000000000E+01) - 1.9065727233886719E+01) / 3.5281665325164795E+00) IS NOT NULL THEN -9.4708174467086792E-02 * ((coalesce(v009, 1.9000000000000000E+01) - 1.9065727233886719E+01) / 3.5281665325164795E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v010, 1.7000000000000000E+01) - 1.6567422866821289E+01) / 3.5326759815216064E+00) IS NOT NULL THEN -8.9562165737152100E-01 * ((coalesce(v010, 1.7000000000000000E+01) - 1.6567422866821289E+01) / 3.5326759815216064E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v011, 2.2000000000000000E+01) - 2.1582788467407227E+01) / 3.9165766239166260E+00) IS NOT NULL THEN 3.7002012133598328E-01 * ((coalesce(v011, 2.2000000000000000E+01) - 2.1582788467407227E+01) / 3.9165766239166260E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v012, 3.6700000762939453E+01) - 3.6837379455566406E+01) / 6.3843864202499390E-01) IS NOT NULL THEN 4.7911399602890015E-01 * ((coalesce(v012, 3.6700000762939453E+01) - 3.6837379455566406E+01) / 6.3843864202499390E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v013, 3.6674999237060547E+01) - 3.6905372619628906E+01) / 6.4792788028717041E-01) IS NOT NULL THEN -4.3508611619472504E-02 * ((coalesce(v013, 3.6674999237060547E+01) - 3.6905372619628906E+01) / 6.4792788028717041E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v014, 3.6299999237060547E+01) - 3.6518978118896484E+01) / 6.3925933837890625E-01) IS NOT NULL THEN -2.5266703963279724E-01 * ((coalesce(v014, 3.6299999237060547E+01) - 3.6518978118896484E+01) / 6.3925933837890625E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v015, 3.7099998474121094E+01) - 3.7287437438964844E+01) / 7.0976376533508301E-01) IS NOT NULL THEN 1.4402523636817932E-01 * ((coalesce(v015, 3.7099998474121094E+01) - 3.7287437438964844E+01) / 7.0976376533508301E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v016, 9.5000000000000000E+01) - 9.4956207275390625E+01) / 4.0869817733764648E+00) IS NOT NULL THEN -5.1141981035470963E-02 * ((coalesce(v016, 9.5000000000000000E+01) - 9.4956207275390625E+01) / 4.0869817733764648E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v017, 9.5333335876464844E+01) - 9.4709121704101562E+01) / 2.9631731510162354E+00) IS NOT NULL THEN 1.4521133899688721E-01 * ((coalesce(v017, 9.5333335876464844E+01) - 9.4709121704101562E+01) / 2.9631731510162354E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v018, 9.4000000000000000E+01) - 9.2625045776367188E+01) / 7.5527610778808594E+00) IS NOT NULL THEN -1.1566805094480515E-01 * ((coalesce(v018, 9.4000000000000000E+01) - 9.2625045776367188E+01) / 7.5527610778808594E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v019, 9.7000000000000000E+01) - 9.6417213439941406E+01) / 2.6078658103942871E+00) IS NOT NULL THEN 1.2086430937051773E-01 * ((coalesce(v019, 9.7000000000000000E+01) - 9.6417213439941406E+01) / 2.6078658103942871E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v020, 1.0700000524520874E+00) - 1.1651709079742432E+00) / 5.7236963510513306E-01) IS NOT NULL THEN 4.7171485424041748E-01 * ((coalesce(v020, 1.0700000524520874E+00) - 1.1651709079742432E+00) / 5.7236963510513306E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v021, 1.1499999761581421E+00) - 1.2414137125015259E+00) / 6.2797355651855469E-01) IS NOT NULL THEN -6.6132557392120361E-01 * ((coalesce(v021, 1.1499999761581421E+00) - 1.2414137125015259E+00) / 6.2797355651855469E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v022, 4.5000000000000000E+01) - 4.8534000396728516E+01) / 2.1737615585327148E+01) IS NOT NULL THEN 1.0897718667984009E+00 * ((coalesce(v022, 4.5000000000000000E+01) - 4.8534000396728516E+01) / 2.1737615585327148E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v023, 4.8000000000000000E+01) - 5.2358047485351562E+01) / 2.4840066909790039E+01) IS NOT NULL THEN -1.0669609308242798E+00 * ((coalesce(v023, 4.8000000000000000E+01) - 5.2358047485351562E+01) / 2.4840066909790039E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v024, 4.3000001907348633E+00) - 4.3343834877014160E+00) / 4.3777310848236084E-01) IS NOT NULL THEN 7.5991608202457428E-02 * ((coalesce(v024, 4.3000001907348633E+00) - 4.3343834877014160E+00) / 4.3777310848236084E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v025, 4.4000000953674316E+00) - 4.4074530601501465E+00) / 4.6693819761276245E-01) IS NOT NULL THEN -1.0026296228170395E-01 * ((coalesce(v025, 4.4000000953674316E+00) - 4.4074530601501465E+00) / 4.6693819761276245E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v026, 8.3999996185302734E+00) - 9.0329999923706055E+00) / 3.2154924869537354E+00) IS NOT NULL THEN 6.5581059455871582E-01 * ((coalesce(v026, 8.3999996185302734E+00) - 9.0329999923706055E+00) / 3.2154924869537354E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v027, 8.8999996185302734E+00) - 9.8543214797973633E+00) / 3.7153511047363281E+00) IS NOT NULL THEN -7.2543120384216309E-01 * ((coalesce(v027, 8.8999996185302734E+00) - 9.8543214797973633E+00) / 3.7153511047363281E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v028, 1.2300000190734863E+01) - 1.2350134849548340E+01) / 1.7055633068084717E+00) IS NOT NULL THEN -1.0707219839096069E+00 * ((coalesce(v028, 1.2300000190734863E+01) - 1.2350134849548340E+01) / 1.7055633068084717E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v029, 1.2500000000000000E+01) - 1.2531847953796387E+01) / 1.7161175012588501E+00) IS NOT NULL THEN 9.5390659570693970E-01 * ((coalesce(v029, 1.2500000000000000E+01) - 1.2531847953796387E+01) / 1.7161175012588501E+00) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v030, 2.3200000762939453E+01) - 4.7281444549560547E+01) / 5.3022598266601562E+01) IS NOT NULL THEN 2.1448411941528320E+00 * ((coalesce(v030, 2.3200000762939453E+01) - 4.7281444549560547E+01) / 5.3022598266601562E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v031, 3.6000000000000000E+01) - 6.0549175262451172E+01) / 6.4640861511230469E+01) IS NOT NULL THEN -2.0736610889434814E+00 * ((coalesce(v031, 3.6000000000000000E+01) - 6.0549175262451172E+01) / 6.4640861511230469E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v032, 0.0000000000000000E+00) - 3.7456780672073364E-01) / 4.8401111364364624E-01) IS NOT NULL THEN -2.3490665853023529E-01 * ((coalesce(v032, 0.0000000000000000E+00) - 3.7456780672073364E-01) / 4.8401111364364624E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v033, 0.0000000000000000E+00) - 3.2616212964057922E-01) / 4.6880742907524109E-01) IS NOT NULL THEN 3.7303611636161804E-02 * ((coalesce(v033, 0.0000000000000000E+00) - 3.2616212964057922E-01) / 4.6880742907524109E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v034, 0.0000000000000000E+00) - 5.8778334408998489E-02) / 2.3520936071872711E-01) IS NOT NULL THEN 3.8644513487815857E-01 * ((coalesce(v034, 0.0000000000000000E+00) - 5.8778334408998489E-02) / 2.3520936071872711E-01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v035, 7.6514717102050781E+01) - 7.2619750976562500E+01) / 1.7708871841430664E+01) IS NOT NULL THEN 4.4685193896293640E-01 * ((coalesce(v035, 7.6514717102050781E+01) - 7.2619750976562500E+01) / 1.7708871841430664E+01) ELSE 0E0 END
+           + CASE WHEN ((coalesce(v036, 1.0000000000000000E+00) - 5.6703805923461914E-01) / 4.9548551440238953E-01) IS NOT NULL THEN -1.0573853552341461E-01 * ((coalesce(v036, 1.0000000000000000E+00) - 5.6703805923461914E-01) / 4.9548551440238953E-01) ELSE 0E0 END
+           + CASE WHEN (((CASE WHEN v032 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01) IS NOT NULL THEN 1.2433166615664959E-02 * (((CASE WHEN v032 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01) ELSE 0E0 END
+           + CASE WHEN (((CASE WHEN v033 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01) IS NOT NULL THEN 1.2433166615664959E-02 * (((CASE WHEN v033 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01) ELSE 0E0 END
+           + CASE WHEN (((CASE WHEN v034 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01) IS NOT NULL THEN 1.2433166615664959E-02 * (((CASE WHEN v034 IS NULL THEN 1E0 ELSE 0E0 END) - 2.4049173295497894E-01) / 4.2738211154937744E-01) ELSE 0E0 END))) AS probabilidad
+  FROM vars
+)
+SELECT patient_ref, episode_ref, t0 AS ingreso, t_eval AS momento, probabilidad
+FROM nucleo
+ORDER BY patient_ref, ingreso
