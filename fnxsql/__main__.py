@@ -93,6 +93,9 @@ def main(argv=None):
         p.add_argument("--prueba", type=float, default=0.2, help="fracción de pacientes de prueba (hash de patient_ref)")
         p.add_argument("--paciencia", type=int, default=0, help="parada temprana por la pérdida de prueba (0 = no)")
         p.add_argument("--forzar", action="store_true", help="permite consultas de más de 262.144 bytes (AWS Athena)")
+        p.add_argument("--metodo", default="una", choices=["una", "niveles"],
+                       help="una: todo el entrenamiento dentro de UNA consulta (por defecto); niveles: una consulta por árbol y nivel")
+        p.add_argument("--arboles-por-consulta", type=int, help="con --metodo una: parte el bucle en varias consultas")
         p.add_argument("--salida", default=f"salidas/{'boosting_sql' if nombre == 'entrenar' else 'comparacion'}")
         if nombre == "comparar":
             p.add_argument("--repeticiones", type=int, default=5, help="veces que se mide el entrenamiento local")
@@ -181,13 +184,15 @@ def main(argv=None):
         par = E.Parametros(a.arboles, a.profundidad, a.eta, a.lambda_, a.min_hijo, a.min_ingresos, a.bins, a.prueba, a.paciencia)
         contrato = K.Contrato.leer(a.contrato)
         if a.orden == "entrenar":
-            res = E.entrenar(nombres, contrato, par, forzar=a.forzar)
+            from . import entrenar_una as U
+            res = (U.entrenar(nombres, contrato, par, a.arboles_por_consulta, forzar=a.forzar) if a.metodo == "una"
+                   else E.entrenar(nombres, contrato, par, forzar=a.forzar))
             carpeta = E.guardar(res, a.salida)
             print(f"{len(res['documento']['nucleo']['arboles'])} árboles en {res['segundos']:.0f} s y {len(res['consultas'])} "
                   f"consultas -> {carpeta} (boosting_sql.json se evalúa con `fnxsql evaluar`)")
             return 0
         from .comparar import comparar
-        comparar(nombres, contrato, par, a.salida, a.repeticiones, a.forzar)
+        comparar(nombres, contrato, par, a.salida, a.repeticiones, a.forzar, a.metodo, a.arboles_por_consulta)
         return 0
     return 2
 

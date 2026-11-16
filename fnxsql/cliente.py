@@ -47,8 +47,9 @@ def esperar_salud(max_segundos=300):
         time.sleep(10)
 
 
-def ejecutar(sql, timeout=180):
-    """Ejecuta una consulta de solo lectura: (DataFrame, segundos de reloj, stats de Trino)."""
+def ejecutar(sql, timeout=180, max_segundos=None):
+    """Ejecuta una consulta de solo lectura: (DataFrame, segundos de reloj, stats de Trino). max_segundos: tiempo máximo
+    en el servidor (por defecto config.MAX_SEGUNDOS_CONSULTA)."""
     datos = sql.encode("utf-8")
     if len(datos) > C.MAX_SQL_BYTES_FAKENEX:  # el de AWS Athena (MAX_SQL_BYTES) lo aplica sql.compilar, salvo --forzar
         raise ErrorFakeNex(f"SQL de {len(datos):,} bytes: supera el límite del proxy de FakeNex ({C.MAX_SQL_BYTES_FAKENEX:,})")
@@ -70,15 +71,16 @@ def ejecutar(sql, timeout=180):
             msg = r["error"].get("message", "")
             if "still initializing" in msg:
                 esperar_salud()
-                return ejecutar(sql, timeout)
+                return ejecutar(sql, timeout, max_segundos)
             raise ErrorFakeNex(msg)
         cols = cols or [c["name"] for c in r.get("columns", [])] or None
         filas += r.get("data", [])
         if "nextUri" not in r:
             st = r.get("stats", {})
-            if st.get("elapsedTimeMillis", 0) / 1000 > C.MAX_SEGUNDOS_CONSULTA:
+            limite = max_segundos or C.MAX_SEGUNDOS_CONSULTA
+            if st.get("elapsedTimeMillis", 0) / 1000 > limite:
                 raise ErrorFakeNex(f"la consulta tardó {st['elapsedTimeMillis'] / 1000:.0f} s en el servidor (máximo "
-                                   f"{C.MAX_SEGUNDOS_CONSULTA} s): se detiene la batería para no sobrecargarlo")
+                                   f"{limite} s): se detiene la batería para no sobrecargarlo")
             return pd.DataFrame(filas, columns=cols), time.time() - t, st
         r = _get(r["nextUri"], timeout)
 

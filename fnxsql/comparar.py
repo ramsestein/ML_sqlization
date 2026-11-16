@@ -66,23 +66,27 @@ def completar(carpeta):
     return inf
 
 
-def comparar(nombres, contrato=None, p=None, salida="salidas/comparacion", repeticiones=5, forzar=False):
+def comparar(nombres, contrato=None, p=None, salida="salidas/comparacion", repeticiones=5, forzar=False, metodo="una",
+             arboles_por_consulta=None):
+    """metodo: "una" (todo el entrenamiento en una consulta, entrenar_una.py) o "niveles" (una consulta por árbol y nivel)."""
     import xgboost as xgb
+    from . import entrenar_una as U
     contrato, p = contrato or K.Contrato(), p or E.Parametros()
     carpeta = Path(salida)
     carpeta.mkdir(parents=True, exist_ok=True)
     variables, errores = K.variables_del_modelo(nombres, contrato)
     if errores:
         raise ValueError("; ".join(errores))
-    inf = {"parametros": vars(p), "variables": nombres, "fecha": time.strftime("%Y-%m-%d %H:%M:%S")}
+    inf = {"parametros": vars(p), "variables": nombres, "fecha": time.strftime("%Y-%m-%d %H:%M:%S"), "metodo": metodo}
 
     # ---------------------------------------------------------------- A. SQL
     print(f"== A. entrenamiento con consultas SQL ({p.arboles} árboles, profundidad {p.profundidad}, {p.bins} intervalos)",
           flush=True)
-    res = E.entrenar(nombres, contrato, p, forzar=forzar)
+    res = (U.entrenar(nombres, contrato, p, arboles_por_consulta, forzar=forzar) if metodo == "una"
+           else E.entrenar(nombres, contrato, p, forzar=forzar))
     E.guardar(res, carpeta / "sql")
     cs = res["consultas"]
-    pasos = [c for c in cs if c["que"] != "inicio"]
+    pasos = [c for c in cs if c["que"] != "inicio"] or cs
     inf["A_sql"] = {"segundos": round(res["segundos"], 1), "consultas": len(cs),
                     "reloj_s": round(sum(c["reloj_s"] for c in cs), 1), "servidor_s": round(sum(c["servidor_s"] for c in cs), 1),
                     "planificacion_s": round(sum(c["planificacion_s"] for c in cs), 1),
@@ -126,7 +130,13 @@ def comparar(nombres, contrato=None, p=None, salida="salidas/comparacion", repet
     # ---------------------------------------------------------------- C. réplica local del algoritmo del SQL
     print("== C. el algoritmo del SQL en numpy (verificación)", flush=True)
     t = time.time()
-    arb_loc, hist_loc = E.entrenar_local(X, y, prueba, res["cortes"], (res["tasa"], res["margen"]), nombres, p)
+    if metodo == "una":  # mismas operaciones y en el mismo orden que la consulta: debe coincidir bit a bit
+        cd = [c_ or [0.0] for c_ in res["cortes"]]
+        arb_loc = [U._arbol_doc(f_, b_, i_, v_, [0] * len(f_), [0] * len(f_), [0] * len(f_), [0] * len(f_), cd, nombres, p)
+                   for f_, b_, i_, v_ in U.local(X, y, prueba, df.episode_ref.to_numpy(), res["cortes"], res["margen"], p)]
+        hist_loc = res["historial"]
+    else:
+        arb_loc, hist_loc = E.entrenar_local(X, y, prueba, res["cortes"], (res["tasa"], res["margen"]), nombres, p)
     t_rep = time.time() - t
     arb_sql = res["documento"]["nucleo"]["arboles"]
     distintos, dhoja, nodos = E.comparar_arboles(arb_sql, arb_loc)
@@ -180,7 +190,9 @@ def informe_md(inf):
     A, Bd, R, D, P = inf["A_sql"], inf["B_descarga"], inf["C_replica"], inf["D_calidad"], inf["parametros"]
     q, e = D["prueba"], D["diferencia_prob_sql_vs_xgboost_local"]
     f = lambda x: f"{x:.4f}"
-    L = [f"# Entrenar con SQL frente a descargar y entrenar XGBoost", "", f"{inf['fecha']} · {len(inf['variables'])} variables · "
+    L = [f"# Entrenar con SQL frente a descargar y entrenar XGBoost", "",
+         f"Método SQL: {'todo el entrenamiento dentro de la consulta (entrenar_una.py)' if inf.get('metodo', 'niveles') == 'una' else 'una consulta por árbol y nivel (entrenar.py)'}.", "",
+         f"{inf['fecha']} · {len(inf['variables'])} variables · "
          f"{A['ingresos']['entrenamiento']} ingresos de entrenamiento y {q['ingresos']} de prueba ({q['positivos']} muertes) · "
          f"{P['arboles']} árboles, profundidad {P['profundidad']}, eta {P['eta']}, lambda {P['lambda_']}, "
          f"min_child_weight {P['min_hijo']}, {P['bins']} intervalos", "",
