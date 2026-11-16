@@ -299,6 +299,22 @@ en `resultados/entrenar_sql_vs_xgboost.md`):
 - El precio es el tiempo: ~45 veces más que descargar y entrenar. Lo que se gana es que ninguna fila de pacientes sale
   del servidor y que basta con permiso de lectura.
 
+**Prueba en DataNex** (`datanex/consultas_datanex.zip`, generado con `python -m fnxsql datanex preparar`): consultas
+`.txt` autocontenidas para pegar en Athena; cada una da su CSV y no depende de ninguna otra. Los pacientes se eligen
+dentro de cada consulta con un hash de `patient_ref` (sin el filtro de la base original de FakeNex):
+
+| Consulta | Resultado (CSV) |
+|---|---|
+| `00_variables_10_pacientes` | las 37 variables de los ingresos de 10 pacientes al azar |
+| `01`–`10_inferencia_<modelo>` | probabilidad de cada modelo (los 8 de práctica, `boosting_sql`, `xgboost_local`) para esos ingresos |
+| `11_entrenamiento_20_arboles`, `12_entrenamiento_100_arboles` | el entrenamiento completo en UNA consulta (1000 pacientes al azar): el modelo como tabla, una fila por nodo de cada árbol (variable, umbral, ausentes, hoja, pérdida tras el árbol) |
+
+`python -m fnxsql datanex comprobar --csv <carpeta>` compara cada inferencia con el modelo evaluado en local sobre el CSV
+de variables; `python -m fnxsql datanex importar <entrenamiento>.csv` convierte la tabla en un JSON de XGBoost. Ensayado
+en FakeNex con los mismos ficheros: variables 6 s, cada inferencia 5-9 s (todas = modelo en local, de 8·10⁻¹⁷ a 6·10⁻⁸),
+entrenamiento de 20 árboles 146 s (2.407 ingresos); el modelo importado de la tabla reproduce las pérdidas calculadas
+dentro de la consulta hasta 9·10⁻¹⁵. El de 100 árboles en una consulta no se ensayó en FakeNex (ver lecciones).
+
 Lecciones de esta parte:
 
 - **Las lambdas anidadas cuestan en el proxy de FakeNex, no en Trino**: el tiempo de aceptar una consulta crece de forma
@@ -346,10 +362,12 @@ fnxsql/
   practicar.py  modelos de práctica con datos de FakeNex
   entrenar.py   gradient boosting con una consulta por árbol y nivel; partición, exportación (if-then / XGBoost), réplica
   entrenar_una.py  el mismo entrenamiento dentro de una consulta (máquina de estados con reduce) y su réplica en numpy
+  datanex.py    consultas .txt autocontenidas para DataNex (Athena), lectura de sus CSV y comprobación
   comparar.py   estudio: entrenar con SQL frente a descargar y entrenar XGBoost
   __main__.py   orquestador (python -m fnxsql)
 ejemplos/       contratos de ejemplo
 resultados/     informe de `comparar` (entrenar con SQL frente a descargar y entrenar XGBoost)
+datanex/        consultas para DataNex (consultas/*.txt y su zip), documentos if-then de los modelos y plan.json
 tests/          tests sin red (gramática, exactitud del if-then por tipo de modelo, compilación SQL, entrenamiento)
 ```
 
