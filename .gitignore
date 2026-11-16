@@ -13,3 +13,5 @@ dist/
 .venv/
 venv/
 .pytest_cache/
+# registros de ejecuciones largas
+salidas_*.log

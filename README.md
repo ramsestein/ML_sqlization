@@ -170,6 +170,8 @@ Salidas en `salidas/<modelo>/`: `informe.md` / `informe.json`, `if_then.json`, `
 | `sql MODELO` | solo la consulta, sin ejecutarla | `--pacientes` / `--muestra`, `--sql`, `--precision`, `--salida` |
 | `practicar` | entrenar modelos de ejemplo con datos de FakeNex | `--modelos`, `--salida` |
 | `demo` | `practicar` + `evaluar` de todos | `--modelos`, `--muestra`, `--lotes`, `--sql`, `--precision` |
+| `entrenar` | gradient boosting (XGBoost hist) entrenado con consultas SQL, sin descargar filas | `--variables`, `--arboles`, `--profundidad`, `--eta`, `--lambda`, `--min-hijo`, `--min-ingresos`, `--bins`, `--prueba`, `--paciencia`, `--salida` |
+| `comparar` | estudio: `entrenar` frente a descargar los datos y entrenar XGBoost en local | las de `entrenar` y `--repeticiones` |
 
 Globales: `--url` (o `FAKENEX_URL`) y `--usuario` (o `FAKENEX_USER`; por defecto uno aleatorio `fnxsql-xxxxxxxx`).
 
@@ -241,6 +243,36 @@ float32: el SQL hace las mismas cuentas en real que el modelo.
 (PCA + boosting y KNN se probaron en el experimento pero no están en `fnxsql`: el PCA no es un paso de Pipeline admitido
 y el "modelo" de un KNN son sus datos de entrenamiento.)
 
+## Experimental: entrenar el modelo con consultas SQL
+
+¿Se puede **entrenar** un gradient boosting dentro del data warehouse, sin permiso de escritura y sin que salga ninguna
+fila de pacientes? Sí: `fnxsql entrenar` reproduce el algoritmo de XGBoost con histogramas (`tree_method="hist"`)
+con una consulta por árbol y nivel. Lo único que sale del servidor son sumas agregadas por nodo.
+
+```
+consulta 0:  ingresos, tasa base y cortes de cada variable (approx_percentile, float32; como max_bin)
+por cada árbol y nivel, UNA consulta que en el servidor:
+   recalcula las variables desde rc / labs / demographics (las mismas que en la inferencia)
+   aplica el modelo entrenado hasta ahora  ← viaja DENTRO de la consulta como arrays binarios float32
+   compara con lo que pasó a cada ingreso: g = p - y, h = p(1 - p)
+   GROUP BY (nodo, variable, intervalo) → sumas acumuladas → ganancia de cada corte (ausentes a cada lado)
+   devuelve una fila por nodo: el mejor corte y sus sumas (+ pérdida de entrenamiento y de prueba)
+el cliente añade el corte y manda la consulta siguiente; las hojas salen de las sumas del corte (−η·G / (H + λ))
+```
+
+```bash
+python -m fnxsql entrenar --arboles 100 --profundidad 3 --eta 0.1           # -> salidas/boosting_sql/boosting_sql.json
+python -m fnxsql evaluar salidas/boosting_sql/boosting_sql.json --muestra 5   # su consulta de inferencia, validada
+python -m fnxsql comparar --arboles 100 --profundidad 3 --eta 0.1           # estudio frente a descarga + XGBoost
+```
+
+El resultado se guarda como documento if-then y como **JSON de XGBoost** (lo carga `xgboost.Booster` y lo evalúa
+`fnxsql evaluar`, como cualquier otro XGBoost). Partición entrenamiento / prueba por paciente con un hash de
+`patient_ref`, idéntico en SQL y en Python. `--min-ingresos` impone un mínimo de ingresos por hijo (tamaño mínimo de cada
+agregado; no es privacidad formal). `--paciencia` para cuando la pérdida de prueba deja de mejorar.
+
+Resultados de la comparación con descarga + XGBoost: pendientes de la medición en curso.
+
 ## Lecciones (medidas durante el desarrollo)
 - **Trino no materializa los CTE** y funde las proyecciones que se usan una sola vez: 77 árboles en columnas separadas
   acabaron en una única expresión de 230 KB que no compilaba. Usar cada columna dos veces (suma + array) lo evita; los
@@ -268,9 +300,11 @@ fnxsql/
   validar.py    evaluación con comprobaciones automáticas e informe
   normalizar.py renombrado de variables a códigos de DataNex
   practicar.py  modelos de práctica con datos de FakeNex
+  entrenar.py   gradient boosting entrenado con consultas SQL (estado en arrays binarios) y el mismo algoritmo en numpy
+  comparar.py   estudio: entrenar con SQL frente a descargar y entrenar XGBoost
   __main__.py   orquestador (python -m fnxsql)
 ejemplos/       contratos de ejemplo
-tests/          tests sin red (gramática, exactitud del if-then por tipo de modelo, compilación SQL)
+tests/          tests sin red (gramática, exactitud del if-then por tipo de modelo, compilación SQL, entrenamiento)
 ```
 
 ## Licencia
