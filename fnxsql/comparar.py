@@ -206,7 +206,8 @@ def informe_md(inf):
          f"| Servidor: reloj / planificación / CPU (s) | {A['servidor_s']} / {A['planificacion_s']} / {A['cpu_servidor_s']} | "
          f"{Bd['descarga_servidor_s']} / - / - |",
          f"| SQL enviado (total / máx. por consulta) | {A['bytes_sql_enviados'] / 1e6:.1f} MB / {A['bytes_sql_max'] / 1024:.0f} KB | - |",
-         f"| Filas de pacientes que salen | **0** (solo {A['filas_devueltas']} filas de sumas por nodo) | "
+         f"| Filas de pacientes que salen | **0** (solo {A['filas_devueltas']} filas: "
+         f"{'los árboles y las pérdidas' if inf.get('metodo') == 'una' else 'sumas agregadas por nodo'}) | "
          f"**{Bd['filas_de_pacientes_devueltas']}** ({Bd['valores_devueltos']:,} valores) |", "",
          f"Memoria máxima por consulta en A: {A['memoria_max_mb']} MB. XGBoost {Bd['xgboost']} con {Bd['hilos']} hilos.", "",
          "## Calidad en los pacientes de prueba", "",

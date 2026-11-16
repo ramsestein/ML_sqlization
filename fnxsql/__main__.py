@@ -95,7 +95,8 @@ def main(argv=None):
         p.add_argument("--forzar", action="store_true", help="permite consultas de más de 262.144 bytes (AWS Athena)")
         p.add_argument("--metodo", default="una", choices=["una", "niveles"],
                        help="una: todo el entrenamiento dentro de UNA consulta (por defecto); niveles: una consulta por árbol y nivel")
-        p.add_argument("--arboles-por-consulta", type=int, help="con --metodo una: parte el bucle en varias consultas")
+        p.add_argument("--arboles-por-consulta", type=int, default=20,
+                       help="con --metodo una: árboles por consulta (por defecto 20, ~75 s cada una en FakeNex; 0 = todos en una)")
         p.add_argument("--salida", default=f"salidas/{'boosting_sql' if nombre == 'entrenar' else 'comparacion'}")
         if nombre == "comparar":
             p.add_argument("--repeticiones", type=int, default=5, help="veces que se mide el entrenamiento local")
@@ -185,14 +186,14 @@ def main(argv=None):
         contrato = K.Contrato.leer(a.contrato)
         if a.orden == "entrenar":
             from . import entrenar_una as U
-            res = (U.entrenar(nombres, contrato, par, a.arboles_por_consulta, forzar=a.forzar) if a.metodo == "una"
+            res = (U.entrenar(nombres, contrato, par, a.arboles_por_consulta or None, forzar=a.forzar) if a.metodo == "una"
                    else E.entrenar(nombres, contrato, par, forzar=a.forzar))
             carpeta = E.guardar(res, a.salida)
             print(f"{len(res['documento']['nucleo']['arboles'])} árboles en {res['segundos']:.0f} s y {len(res['consultas'])} "
                   f"consultas -> {carpeta} (boosting_sql.json se evalúa con `fnxsql evaluar`)")
             return 0
         from .comparar import comparar
-        comparar(nombres, contrato, par, a.salida, a.repeticiones, a.forzar, a.metodo, a.arboles_por_consulta)
+        comparar(nombres, contrato, par, a.salida, a.repeticiones, a.forzar, a.metodo, a.arboles_por_consulta or None)
         return 0
     return 2
 
