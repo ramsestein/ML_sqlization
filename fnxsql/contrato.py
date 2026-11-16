@@ -186,6 +186,9 @@ def sql_variables(variables, contrato, pids=None, cohorte=None):
     leen sus filas; un filtro por patient_ref no dispara el crecimiento automático de FakeNex.
     cohorte: Cohorte (los pacientes se eligen dentro de la consulta, p. ej. en DataNex); tiene prioridad sobre pids."""
     filtro = _filtro(pids, cohorte)
+    # con una lista de pacientes, el filtro se repite en cada tabla (se empuja a la lectura); con una cohorte basta con
+    # el de los ingresos: los JOIN por patient_ref con `adm` ya la restringen y así la cohorte se calcula menos veces
+    en_join = (lambda al: "") if cohorte is not None else (lambda al: f" AND {al}.patient_ref {filtro}")
     S, mo, ve = C.ESQUEMA, contrato.momento_horas, contrato.ventana_horas
     win = lambda t: f"{t} BETWEEN a.t_eval - INTERVAL '{ve}' HOUR AND a.t_eval"
     rc_num, rc_cat, lab, fuera = [], [], [], []
@@ -212,8 +215,8 @@ def sql_variables(variables, contrato, pids=None, cohorte=None):
         fuentes = {"rc_num": "rc", "rc_cat": "rc_codigo", "lab": "labs"}[nombre]
         codes = ", ".join(map(q, sorted({v.codigo for v in variables if v.fuente == fuentes})))
         ctes.append(f"{nombre} AS (\n  SELECT a.episode_ref AS ep_{nombre},\n         " + ",\n         ".join(cols)
-                    + f"\n  FROM adm a JOIN {S}.{tabla} {alias} ON {alias}.patient_ref = a.patient_ref AND {alias}.patient_ref "
-                    f"{filtro}\n   AND {extra.format(codes=codes)}\n  GROUP BY a.episode_ref\n)")
+                    + f"\n  FROM adm a JOIN {S}.{tabla} {alias} ON {alias}.patient_ref = a.patient_ref{en_join(alias)}"
+                    f"\n   AND {extra.format(codes=codes)}\n  GROUP BY a.episode_ref\n)")
         uniones.append(f"LEFT JOIN {nombre} ON {nombre}.ep_{nombre} = a.episode_ref")
     edad = "CAST(date_diff('day', CAST(d.birth_date AS timestamp(3)), a.t_eval) AS double) / 365.25E0"
     sel = []
@@ -234,7 +237,7 @@ def sql_variables(variables, contrato, pids=None, cohorte=None):
             e = f"coalesce({e}, {lit(contrato.si_falta)})"
         sel.append(f"-- {v.nombre}\n         {e} AS {c}")
     ctes.append("vars AS (\n  SELECT a.patient_ref, a.episode_ref, a.t0, a.t_eval,\n         " + ",\n         ".join(sel)
-                + f"\n  FROM adm a\n  LEFT JOIN {S}.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref {filtro}"
+                + f"\n  FROM adm a\n  LEFT JOIN {S}.demographics d ON d.patient_ref = a.patient_ref{en_join('d')}"
                 + "".join(f"\n  {u}" for u in uniones) + "\n)")
     return "WITH\n" + ",\n".join(ctes)
 

@@ -199,11 +199,19 @@ def sql_bucle(J, p, arboles):
     return f"reduce(sequence(1, {arboles * P}), {inicio},\n  (st, it) -> {caso},\n  {salida})"
 
 
-def sql_entrenar(variables, contrato, p, arboles, previo=None, cohorte=None):
+COLUMNAS_TABLA = ["arbol", "nodo", "variable", "umbral", "ausentes_izquierda", "hoja", "ingresos", "hessiano", "ganancia",
+                  "perdida_entrenamiento", "perdida_prueba", "margen_base", "ingresos_entrenamiento", "ingresos_prueba",
+                  "muertes_entrenamiento", "perdida_base_entrenamiento", "perdida_base_prueba"]
+
+
+def sql_entrenar(variables, contrato, p, arboles, previo=None, cohorte=None, salida="json"):
     """La consulta. previo = None (primera: calcula los cortes) o (cortes, margen, árboles hechos en formato if-then).
     cohorte: contrato.Cohorte (pacientes elegidos dentro de la consulta, p. ej. en DataNex); None = base original de FakeNex.
-    Devuelve UNA fila con n, n_prueba, positivos, m0 y, como texto JSON (para que quepa en un CSV de Athena), cortes_json,
-    kv_json y resultado_json = {"arb": [árbol por nodos en anchura...], "perd": [{"e", "p"} por número de árboles]}."""
+    salida="json": UNA fila con n, n_prueba, positivos, m0 y, como texto JSON, cortes_json, kv_json y resultado_json =
+    {"arb": [árbol por nodos en anchura...], "perd": [{"e", "p"} por número de árboles]} (para encadenar consultas).
+    salida="tabla": el modelo como tabla legible, una fila por nodo de cada árbol (COLUMNAS_TABLA): variable, umbral
+    (float32) y adónde van los ausentes en los cortes; valor en las hojas; pérdida tras el árbol; margen base y tamaños.
+    Basta para reconstruir el modelo exacto (tabla_a_arboles)."""
     J = len(variables)
     nombres = [v.nombre for v in variables]
     base = E.sql_base(variables, contrato, p, cohorte)
@@ -250,11 +258,31 @@ def sql_entrenar(variables, contrato, p, arboles, previo=None, cohorte=None):
     bins = lambda xs: (f"transform(sequence(1, {J}), j -> transform({xs}, xx -> coalesce(width_bucket(CAST(element_at(xx, j) AS double), "
                        "element_at(c, j)), -1)))")
     cuerpo += f"         {bins('xe')} AS be,\n         {bins('xp')} AS bp\n  FROM {fuente})\n"
-    final = ("SELECT n, n_prueba, positivos, CAST(m0 AS double) AS m0, json_format(CAST(c AS JSON)) AS cortes_json,\n"
-             "       json_format(CAST(kv AS JSON)) AS kv_json, json_format(CAST(r AS JSON)) AS resultado_json\n"
-             "FROM (SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, (s, v) -> s + v, s -> s) AS positivos, "
-             f"m0, c, kv,\n       {sql_bucle(J, p, arboles)} AS r\nFROM dat)")
-    return base + cuerpo + final
+    modelo = ("SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, (s, v) -> s + v, s -> s) AS positivos, "
+              f"m0, c, kv,\n       {sql_bucle(J, p, arboles)} AS r\nFROM dat")
+    if salida == "json":
+        final = ("SELECT n, n_prueba, positivos, CAST(m0 AS double) AS m0, json_format(CAST(c AS JSON)) AS cortes_json,\n"
+                 "       json_format(CAST(kv AS JSON)) AS kv_json, json_format(CAST(r AS JSON)) AS resultado_json\n"
+                 f"FROM ({modelo})")
+        return base + cuerpo + final
+    S_ = 2 ** (p.profundidad + 1) - 1
+    nom = "ARRAY[" + ", ".join(K.q(n) for n in nombres) + "]"
+    fk, el = "element_at(a.feat, k + 1)", lambda campo: f"element_at(a.{campo}, k + 1)"
+    final = (f"modelo AS (  -- entrenamiento: {arboles} árboles (r se usa varias veces: Trino no repite el cálculo)\n{modelo}\n)\n"
+             f"SELECT CAST(a.arbol AS integer) AS arbol, CAST(k AS integer) AS nodo,  -- nodos en anchura: hijos 2k+1 (sí) y 2k+2 (no)\n"
+             f"       IF({fk} > 0, element_at({nom}, {fk})) AS variable,\n"
+             f"       IF({fk} > 0, element_at(element_at(m.c, {fk}), {el('bin')} + 1)) AS umbral,  -- sí: float32(variable) < umbral\n"
+             f"       IF({fk} > 0, {el('izq')}) AS ausentes_izquierda,\n"
+             f"       CAST({el('val')} AS double) AS hoja,\n"
+             f"       {el('n')} AS ingresos, {el('h')} AS hessiano, IF({fk} > 0, {el('gan')}) AS ganancia,\n"
+             "       element_at(m.r.perd, a.arbol + 1).e AS perdida_entrenamiento, element_at(m.r.perd, a.arbol + 1).p AS perdida_prueba,\n"
+             "       CAST(m.m0 AS double) AS margen_base, m.n AS ingresos_entrenamiento, m.n_prueba AS ingresos_prueba,\n"
+             "       m.positivos AS muertes_entrenamiento, element_at(m.r.perd, 1).e AS perdida_base_entrenamiento,\n"
+             "       element_at(m.r.perd, 1).p AS perdida_base_prueba\n"
+             "FROM modelo m\nCROSS JOIN UNNEST(m.r.arb) WITH ORDINALITY AS a(feat, bin, izq, val, g, h, gan, n, arbol)\n"
+             f"CROSS JOIN UNNEST(sequence(0, {S_ - 1})) AS s(k)\n"
+             f"WHERE {fk} > 0 OR {el('val')} IS NOT NULL\nORDER BY arbol, nodo")
+    return base + cuerpo.rstrip("\n") + ",\n" + final
 
 
 def _arbol_doc(feat, bins, izq, val, gs, hes, gan, cnt, cortes, nombres, p, k=0):
@@ -283,6 +311,39 @@ def leer_fila(fila):
     arb, perd = (r["arb"], r["perd"]) if isinstance(r, dict) else r
     return (int(fila["n"]), int(fila["n_prueba"]), float(fila["positivos"]), float(fila["m0"]), js("cortes_json"),
             js("kv_json"), [_lista(a) for a in arb], [tuple(map(float, _lista(q))) for q in perd])
+
+
+def tabla_a_modelo(filas, nombres, contrato, p, nombre="boosting_datanex"):
+    """Modelo exacto (documento if-then y JSON de XGBoost) desde las filas de la tabla que devuelve
+    sql_entrenar(salida="tabla") (dicts columna -> valor; p. ej. de un CSV de Athena). Devuelve (resultado, historial)."""
+    num = lambda x: None if x in (None, "") else float(x)
+    por_arbol = {}
+    for f in filas:
+        por_arbol.setdefault(int(f["arbol"]), {})[int(f["nodo"])] = f
+    variables, _ = K.variables_del_modelo(nombres, contrato)
+
+    def nodo(t, k):
+        f = por_arbol[t][k]
+        if f.get("variable") in (None, ""):
+            return {"hoja": f32(num(f["hoja"])), "info": {"hessiano": num(f["hessiano"]), "ingresos": int(float(f["ingresos"]))}}
+        izq = f["ausentes_izquierda"]
+        izq = izq if isinstance(izq, bool) else str(izq).strip().lower() == "true"
+        return {"si": {"variable": f["variable"], "op": "<", "valor": f32(num(f["umbral"])), "nulo_a_entonces": izq},
+                "entonces": nodo(t, 2 * k + 1), "si_no": nodo(t, 2 * k + 2),
+                "info": {"ganancia": num(f["ganancia"]), "hessiano": num(f["hessiano"]), "ingresos": int(float(f["ingresos"])),
+                         "peso": 0.0}}
+    arboles = [nodo(t, 0) for t in sorted(por_arbol)]
+    f0 = filas[0]
+    margen = f32(num(f0["margen_base"]))
+    tasa = f32(num(f0["muertes_entrenamiento"]) / int(float(f0["ingresos_entrenamiento"])))
+    historial = [{"arboles": 0, "perdida_entrenamiento": num(f0["perdida_base_entrenamiento"]),
+                  "perdida_prueba": num(f0["perdida_base_prueba"])}]
+    historial += [{"arboles": t, "perdida_entrenamiento": num(por_arbol[t][0]["perdida_entrenamiento"]),
+                   "perdida_prueba": num(por_arbol[t][0]["perdida_prueba"])} for t in sorted(por_arbol)]
+    doc = E.documento(arboles, margen, variables, contrato, nombre, p)
+    return {"documento": doc, "xgboost": E.a_xgboost(doc, tasa), "tasa": tasa, "margen": margen,
+            "ingresos": {"entrenamiento": int(float(f0["ingresos_entrenamiento"])), "prueba": int(float(f0["ingresos_prueba"])),
+                         "positivos": num(f0["muertes_entrenamiento"])}}, historial
 
 
 # ------------------------------------------------------------------ estado de un entrenamiento por tandas (automático o a mano)

@@ -1,7 +1,8 @@
--- Entrenamiento en SQL, tanda 1 de 5: árboles 1-20 de 100 (profundidad 3, eta 0.1, 256 intervalos) con 1000 pacientes al azar
--- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en
--- datanex/resultados/entrenamiento_01.csv
--- Después: python -m fnxsql datanex continuar   (escribe la tanda siguiente)
+-- Entrenamiento en SQL de un gradient boosting (algoritmo de XGBoost con histogramas): 20 árboles de profundidad 3, eta 0.1, 256 intervalos,
+-- con 1000 pacientes al azar (20% de ellos de prueba) y las 37 variables de `fnxsql practicar`; etiqueta: muerte en el ingreso.
+-- Consulta autocontenida generada por fnxsql: ejecutar en Athena (DataNex) y descargar el resultado como CSV.
+-- Todo el entrenamiento ocurre dentro de esta consulta. Resultado: el modelo, una fila por nodo de cada árbol (variable, umbral y
+-- adónde van los ausentes en los cortes; valor en las hojas; pérdida tras cada árbol). No contiene datos de pacientes.
 WITH
 cohorte AS (  -- 1000 pacientes al azar (hash de patient_ref, semilla 0) con algún ingreso HOSP / HOSP_IQ
   SELECT patient_ref FROM (SELECT DISTINCT patient_ref FROM datascope_gestor_prod.episodes
@@ -34,7 +35,7 @@ rc_num AS (
          avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v017,
          min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v018,
          max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v019
-  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref
    AND r.result_num IS NOT NULL AND r.rc_sap_ref IN ('FC', 'FR', 'PULSIOX', 'TAS', 'TEMP') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -43,7 +44,7 @@ rc_cat AS (
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_1' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v032,
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_2' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v033,
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_3' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v034
-  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref
    AND r.rc_sap_ref IN ('ESTADO_CONCIENC') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -61,7 +62,7 @@ lab AS (
          max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v029,
          max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v030,
          max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v031
-  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref AND l.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref
    AND l.result_num IS NOT NULL AND l.lab_sap_ref IN ('LAB110', 'LAB1300', 'LAB2467', 'LAB2575', 'LABHBST', 'LABRPAK') AND l.extrac_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -142,7 +143,7 @@ vars AS (
          -- sex_2
          CAST(CASE WHEN d.sex IS NULL THEN NULL WHEN d.sex = 2 THEN 1E0 ELSE 0E0 END AS double) AS v036
   FROM adm a
-  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref IN (SELECT patient_ref FROM cohorte)
+  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref
   LEFT JOIN rc_num ON rc_num.ep_rc_num = a.episode_ref
   LEFT JOIN rc_cat ON rc_cat.ep_rc_cat = a.episode_ref
   LEFT JOIN lab ON lab.ep_lab = a.episode_ref
@@ -168,10 +169,9 @@ pre2 AS (SELECT ye, yp, xe, xp, c, kv, CAST(ln(tasa / (1E0 - tasa)) AS real) AS 
 dat AS (SELECT ye, yp, c, kv, m0, repeat(m0, cardinality(ye)) AS f0e, repeat(m0, cardinality(yp)) AS f0p,
          transform(sequence(1, 37), j -> transform(xe, xx -> coalesce(width_bucket(CAST(element_at(xx, j) AS double), element_at(c, j)), -1))) AS be,
          transform(sequence(1, 37), j -> transform(xp, xx -> coalesce(width_bucket(CAST(element_at(xx, j) AS double), element_at(c, j)), -1))) AS bp
-  FROM pre2)
-SELECT n, n_prueba, positivos, CAST(m0 AS double) AS m0, json_format(CAST(c AS JSON)) AS cortes_json,
-       json_format(CAST(kv AS JSON)) AS kv_json, json_format(CAST(r AS JSON)) AS resultado_json
-FROM (SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, (s, v) -> s + v, s -> s) AS positivos, m0, c, kv,
+  FROM pre2),
+modelo AS (  -- entrenamiento: 20 árboles (r se usa varias veces: Trino no repite el cálculo)
+SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, (s, v) -> s + v, s -> s) AS positivos, m0, c, kv,
        reduce(sequence(1, 420), CAST(ROW(f0e, f0p, CAST(ARRAY[] AS array(double)), CAST(ARRAY[] AS array(double)), CAST(ARRAY[] AS array(bigint)), CAST(ARRAY[] AS array(bigint)), CAST(ARRAY[] AS array(bigint)), CAST(ARRAY[] AS array(boolean)), CAST(ARRAY[] AS array(double)), CAST(ARRAY[] AS array(double)), CAST(ARRAY[] AS array(bigint)), CAST(ARRAY[] AS array(boolean)), CAST(ARRAY[] AS array(double)), CAST(ARRAY[] AS array(bigint)), CAST(MAP() AS map(bigint, row(double, double, bigint))), CAST(ARRAY[] AS array(ROW(gl array(double), hl array(double), nl array(bigint), cb array(bigint), gm double, hm double, nm bigint))), CAST(ARRAY[] AS array(array(double))), CAST(ARRAY[] AS array(array(double))), CAST(ARRAY[] AS array(ROW(r double, nj bigint, nb bigint, izq boolean, j bigint, b bigint, gl double, hl double, nl bigint, gan double))), CAST(ARRAY[] AS array(real)), CAST(ARRAY[] AS array(ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint)))), CAST(ARRAY[] AS array(ROW(e double, p double)))) AS ROW(f array(real), ft array(real), g array(double), h array(double), nd array(bigint), feat array(bigint), bin array(bigint), izq array(boolean), tg array(double), th array(double), tn array(bigint), ab array(boolean), gan array(double), cl array(bigint), hm map(bigint, row(double, double, bigint)), pq array(ROW(gl array(double), hl array(double), nl array(bigint), cb array(bigint), gm double, hm double, nm bigint)), gt array(array(double)), gf array(array(double)), bs array(ROW(r double, nj bigint, nb bigint, izq boolean, j bigint, b bigint, gl double, hl double, nl bigint, gan double)), va array(real), arb array(ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint))), perd array(ROW(e double, p double)))),
   (st, it) -> CASE (it - 1) % 21
       WHEN 0 THEN element_at(transform(ARRAY[st], st -> CAST(ROW(st.f, st.ft, zip_with(st.f, ye, (fi, yi) -> (1E0 / (1E0 + exp(-CAST(fi AS double)))) - yi), transform(st.f, fi -> (1E0 / (1E0 + exp(-CAST(fi AS double)))) * (1E0 - (1E0 / (1E0 + exp(-CAST(fi AS double)))))), repeat(BIGINT '0', CAST(cardinality(ye) AS bigint)), repeat(BIGINT '0', 15), repeat(BIGINT '0', 15), repeat(false, 15), concat(ARRAY[reduce(zip_with(st.f, ye, (fi, yi) -> (1E0 / (1E0 + exp(-CAST(fi AS double)))) - yi), 0E0, (s, x) -> s + x, s -> s)], repeat(0E0, 14)), concat(ARRAY[reduce(transform(st.f, fi -> (1E0 / (1E0 + exp(-CAST(fi AS double)))) * (1E0 - (1E0 / (1E0 + exp(-CAST(fi AS double)))))), 0E0, (s, x) -> s + x, s -> s)], repeat(0E0, 14)), concat(ARRAY[CAST(cardinality(ye) AS bigint)], repeat(BIGINT '0', 14)), concat(ARRAY[true], repeat(false, 14)), repeat(0E0, 15), st.cl, st.hm, st.pq, st.gt, st.gf, st.bs, st.va, st.arb, st.perd || ARRAY[CAST(ROW((reduce(zip_with(st.f, ye, (pf, py) -> IF(CAST(pf AS double) > 0, CAST(pf AS double) + ln(1E0 + exp(-CAST(pf AS double))), ln(1E0 + exp(CAST(pf AS double)))) - py * CAST(pf AS double)), 0E0, (s, x) -> s + x, s -> s) / cardinality(ye)), (reduce(zip_with(st.ft, yp, (pf, py) -> IF(CAST(pf AS double) > 0, CAST(pf AS double) + ln(1E0 + exp(-CAST(pf AS double))), ln(1E0 + exp(CAST(pf AS double)))) - py * CAST(pf AS double)), 0E0, (s, x) -> s + x, s -> s) / cardinality(yp))) AS ROW(e double, p double))]) AS ROW(f array(real), ft array(real), g array(double), h array(double), nd array(bigint), feat array(bigint), bin array(bigint), izq array(boolean), tg array(double), th array(double), tn array(bigint), ab array(boolean), gan array(double), cl array(bigint), hm map(bigint, row(double, double, bigint)), pq array(ROW(gl array(double), hl array(double), nl array(bigint), cb array(bigint), gm double, hm double, nm bigint)), gt array(array(double)), gf array(array(double)), bs array(ROW(r double, nj bigint, nb bigint, izq boolean, j bigint, b bigint, gl double, hl double, nl bigint, gan double)), va array(real), arb array(ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint))), perd array(ROW(e double, p double))))), 1)
@@ -196,4 +196,20 @@ FROM (SELECT cardinality(ye) AS n, cardinality(yp) AS n_prueba, reduce(ye, 0E0, 
       WHEN 19 THEN element_at(transform(ARRAY[st], st -> CAST(ROW(st.f, st.ft, st.g, st.h, st.nd, st.feat, st.bin, st.izq, st.tg, st.th, st.tn, st.ab, st.gan, st.cl, st.hm, st.pq, st.gt, st.gf, st.bs, transform(sequence(1, 15), k -> IF(element_at(st.ab, k) AND element_at(st.feat, k) = 0, CAST(-1.0000000000000001E-01 * element_at(st.tg, k) / (element_at(st.th, k) + 1.0000000000000000E+00) AS real), CAST(NULL AS real))), st.arb, st.perd) AS ROW(f array(real), ft array(real), g array(double), h array(double), nd array(bigint), feat array(bigint), bin array(bigint), izq array(boolean), tg array(double), th array(double), tn array(bigint), ab array(boolean), gan array(double), cl array(bigint), hm map(bigint, row(double, double, bigint)), pq array(ROW(gl array(double), hl array(double), nl array(bigint), cb array(bigint), gm double, hm double, nm bigint)), gt array(array(double)), gf array(array(double)), bs array(ROW(r double, nj bigint, nb bigint, izq boolean, j bigint, b bigint, gl double, hl double, nl bigint, gan double)), va array(real), arb array(ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint))), perd array(ROW(e double, p double))))), 1)
       WHEN 20 THEN element_at(transform(ARRAY[st], st -> CAST(ROW(zip_with(st.f, st.nd, (pf, pn) -> pf + element_at(st.va, pn + 1)), IF(cardinality(yp) = 0, st.ft, transform(sequence(1, cardinality(yp)), i -> element_at(st.ft, i) + element_at(st.va, reduce(sequence(1, 3), BIGINT '0', (nn, z) -> IF(element_at(st.feat, nn + 1) = 0, nn, IF(element_at(element_at(bp, element_at(st.feat, nn + 1)), i) <= element_at(st.bin, nn + 1) AND (element_at(element_at(bp, element_at(st.feat, nn + 1)), i) >= 0 OR element_at(st.izq, nn + 1)), 2 * nn + 1, 2 * nn + 2)), nn -> nn) + 1))), st.g, st.h, st.nd, st.feat, st.bin, st.izq, st.tg, st.th, st.tn, st.ab, st.gan, st.cl, st.hm, st.pq, st.gt, st.gf, st.bs, st.va, st.arb || ARRAY[CAST(ROW(st.feat, st.bin, st.izq, st.va, st.tg, st.th, st.gan, st.tn) AS ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint)))], st.perd) AS ROW(f array(real), ft array(real), g array(double), h array(double), nd array(bigint), feat array(bigint), bin array(bigint), izq array(boolean), tg array(double), th array(double), tn array(bigint), ab array(boolean), gan array(double), cl array(bigint), hm map(bigint, row(double, double, bigint)), pq array(ROW(gl array(double), hl array(double), nl array(bigint), cb array(bigint), gm double, hm double, nm bigint)), gt array(array(double)), gf array(array(double)), bs array(ROW(r double, nj bigint, nb bigint, izq boolean, j bigint, b bigint, gl double, hl double, nl bigint, gan double)), va array(real), arb array(ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint))), perd array(ROW(e double, p double))))), 1) END,
   st -> CAST(ROW(st.arb, st.perd || ARRAY[CAST(ROW((reduce(zip_with(st.f, ye, (pf, py) -> IF(CAST(pf AS double) > 0, CAST(pf AS double) + ln(1E0 + exp(-CAST(pf AS double))), ln(1E0 + exp(CAST(pf AS double)))) - py * CAST(pf AS double)), 0E0, (s, x) -> s + x, s -> s) / cardinality(ye)), (reduce(zip_with(st.ft, yp, (pf, py) -> IF(CAST(pf AS double) > 0, CAST(pf AS double) + ln(1E0 + exp(-CAST(pf AS double))), ln(1E0 + exp(CAST(pf AS double)))) - py * CAST(pf AS double)), 0E0, (s, x) -> s + x, s -> s) / cardinality(yp))) AS ROW(e double, p double))]) AS ROW(arb array(ROW(feat array(bigint), bin array(bigint), izq array(boolean), val array(real), g array(double), h array(double), gan array(double), n array(bigint))), perd array(ROW(e double, p double))))) AS r
-FROM dat)
+FROM dat
+)
+SELECT CAST(a.arbol AS integer) AS arbol, CAST(k AS integer) AS nodo,  -- nodos en anchura: hijos 2k+1 (sí) y 2k+2 (no)
+       IF(element_at(a.feat, k + 1) > 0, element_at(ARRAY['FC_last', 'FC_mean', 'FC_min', 'FC_max', 'TAS_last', 'TAS_mean', 'TAS_min', 'TAS_max', 'FR_last', 'FR_mean', 'FR_min', 'FR_max', 'TEMP_last', 'TEMP_mean', 'TEMP_min', 'TEMP_max', 'PULSIOX_last', 'PULSIOX_mean', 'PULSIOX_min', 'PULSIOX_max', 'LAB2467_last', 'LAB2467_max', 'LAB110_last', 'LAB110_max', 'LABRPAK_last', 'LABRPAK_max', 'LAB1300_last', 'LAB1300_max', 'LABHBST_last', 'LABHBST_max', 'LAB2575_last', 'LAB2575_max', 'ESTADO_CONCIENC_ESTADO_CONCIENC_1_last', 'ESTADO_CONCIENC_ESTADO_CONCIENC_2_last', 'ESTADO_CONCIENC_ESTADO_CONCIENC_3_last', 'age', 'sex_2'], element_at(a.feat, k + 1))) AS variable,
+       IF(element_at(a.feat, k + 1) > 0, element_at(element_at(m.c, element_at(a.feat, k + 1)), element_at(a.bin, k + 1) + 1)) AS umbral,  -- sí: float32(variable) < umbral
+       IF(element_at(a.feat, k + 1) > 0, element_at(a.izq, k + 1)) AS ausentes_izquierda,
+       CAST(element_at(a.val, k + 1) AS double) AS hoja,
+       element_at(a.n, k + 1) AS ingresos, element_at(a.h, k + 1) AS hessiano, IF(element_at(a.feat, k + 1) > 0, element_at(a.gan, k + 1)) AS ganancia,
+       element_at(m.r.perd, a.arbol + 1).e AS perdida_entrenamiento, element_at(m.r.perd, a.arbol + 1).p AS perdida_prueba,
+       CAST(m.m0 AS double) AS margen_base, m.n AS ingresos_entrenamiento, m.n_prueba AS ingresos_prueba,
+       m.positivos AS muertes_entrenamiento, element_at(m.r.perd, 1).e AS perdida_base_entrenamiento,
+       element_at(m.r.perd, 1).p AS perdida_base_prueba
+FROM modelo m
+CROSS JOIN UNNEST(m.r.arb) WITH ORDINALITY AS a(feat, bin, izq, val, g, h, gan, n, arbol)
+CROSS JOIN UNNEST(sequence(0, 14)) AS s(k)
+WHERE element_at(a.feat, k + 1) > 0 OR element_at(a.val, k + 1) IS NOT NULL
+ORDER BY arbol, nodo

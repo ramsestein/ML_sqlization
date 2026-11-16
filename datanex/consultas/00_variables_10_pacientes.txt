@@ -1,7 +1,6 @@
--- Variables (37) de los ingresos de 10 pacientes al azar (para comprobar la inferencia)
--- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en
--- datanex/resultados/00_variables_10_pacientes.csv
--- Columnas v000, v001...: v000 = FC_last, v001 = FC_mean, v002 = FC_min, v003 = FC_max, v004 = TAS_last, v005 = TAS_mean, v006 = TAS_min, v007 = TAS_max, v008 = FR_last, v009 = FR_mean, v010 = FR_min, v011 = FR_max, v012 = TEMP_last, v013 = TEMP_mean, v014 = TEMP_min, v015 = TEMP_max, v016 = PULSIOX_last, v017 = PULSIOX_mean, v018 = PULSIOX_min, v019 = PULSIOX_max, v020 = LAB2467_last, v021 = LAB2467_max, v022 = LAB110_last, v023 = LAB110_max, v024 = LABRPAK_last, v025 = LABRPAK_max, v026 = LAB1300_last, v027 = LAB1300_max, v028 = LABHBST_last, v029 = LABHBST_max, v030 = LAB2575_last, v031 = LAB2575_max, v032 = ESTADO_CONCIENC_ESTADO_CONCIENC_1_last, v033 = ESTADO_CONCIENC_ESTADO_CONCIENC_2_last, v034 = ESTADO_CONCIENC_ESTADO_CONCIENC_3_last, v035 = age, v036 = sex_2
+-- Variables (37) de los ingresos de 10 pacientes al azar (los mismos que en la inferencia)
+-- Consulta autocontenida generada por fnxsql: ejecutar en Athena (DataNex) y descargar el resultado como CSV.
+-- Una fila por ingreso. Columnas v000, v001...: v000 = FC_last, v001 = FC_mean, v002 = FC_min, v003 = FC_max, v004 = TAS_last, v005 = TAS_mean, v006 = TAS_min, v007 = TAS_max, v008 = FR_last, v009 = FR_mean, v010 = FR_min, v011 = FR_max, v012 = TEMP_last, v013 = TEMP_mean, v014 = TEMP_min, v015 = TEMP_max, v016 = PULSIOX_last, v017 = PULSIOX_mean, v018 = PULSIOX_min, v019 = PULSIOX_max, v020 = LAB2467_last, v021 = LAB2467_max, v022 = LAB110_last, v023 = LAB110_max, v024 = LABRPAK_last, v025 = LABRPAK_max, v026 = LAB1300_last, v027 = LAB1300_max, v028 = LABHBST_last, v029 = LABHBST_max, v030 = LAB2575_last, v031 = LAB2575_max, v032 = ESTADO_CONCIENC_ESTADO_CONCIENC_1_last, v033 = ESTADO_CONCIENC_ESTADO_CONCIENC_2_last, v034 = ESTADO_CONCIENC_ESTADO_CONCIENC_3_last, v035 = age, v036 = sex_2
 WITH
 cohorte AS (  -- 10 pacientes al azar (hash de patient_ref, semilla 1) con algún ingreso HOSP / HOSP_IQ
   SELECT patient_ref FROM (SELECT DISTINCT patient_ref FROM datascope_gestor_prod.episodes
@@ -34,7 +33,7 @@ rc_num AS (
          avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v017,
          min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v018,
          max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v019
-  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref
    AND r.result_num IS NOT NULL AND r.rc_sap_ref IN ('FC', 'FR', 'PULSIOX', 'TAS', 'TEMP') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -43,7 +42,7 @@ rc_cat AS (
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_1' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v032,
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_2' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v033,
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_3' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v034
-  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref
    AND r.rc_sap_ref IN ('ESTADO_CONCIENC') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -61,7 +60,7 @@ lab AS (
          max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v029,
          max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v030,
          max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v031
-  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref AND l.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref
    AND l.result_num IS NOT NULL AND l.lab_sap_ref IN ('LAB110', 'LAB1300', 'LAB2467', 'LAB2575', 'LABHBST', 'LABRPAK') AND l.extrac_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -142,7 +141,7 @@ vars AS (
          -- sex_2
          CAST(CASE WHEN d.sex IS NULL THEN NULL WHEN d.sex = 2 THEN 1E0 ELSE 0E0 END AS double) AS v036
   FROM adm a
-  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref IN (SELECT patient_ref FROM cohorte)
+  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref
   LEFT JOIN rc_num ON rc_num.ep_rc_num = a.episode_ref
   LEFT JOIN rc_cat ON rc_cat.ep_rc_cat = a.episode_ref
   LEFT JOIN lab ON lab.ep_lab = a.episode_ref

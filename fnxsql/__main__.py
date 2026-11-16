@@ -10,7 +10,7 @@
   demo                  practicar + evaluar todos los modelos de ejemplo: la ejecución "sola" de principio a fin
   entrenar              entrena un gradient boosting (XGBoost hist) con consultas SQL, sin descargar filas de pacientes
   comparar              estudio: entrenar con SQL frente a descargar los datos y entrenar XGBoost en local
-  datanex               consultas .txt para DataNex (Athena): preparar, continuar (entrenamiento por tandas), comprobar
+  datanex               consultas .txt autocontenidas para DataNex (Athena): preparar, importar, comprobar
 """
 import argparse
 import json
@@ -101,26 +101,24 @@ def main(argv=None):
         p.add_argument("--salida", default=f"salidas/{'boosting_sql' if nombre == 'entrenar' else 'comparacion'}")
         if nombre == "comparar":
             p.add_argument("--repeticiones", type=int, default=5, help="veces que se mide el entrenamiento local")
-    p = sub.add_parser("datanex", help="consultas .txt para DataNex (Athena) y lectura de sus CSV")
+    p = sub.add_parser("datanex", help="consultas .txt autocontenidas para DataNex (Athena) y lectura de sus CSV")
     dsub = p.add_subparsers(dest="paso", required=True)
-    q = dsub.add_parser("preparar", help="escribe datanex/consultas/*.txt (inferencia de los modelos y 1.ª tanda de entrenamiento)")
+    q = dsub.add_parser("preparar", help="escribe datanex/consultas/*.txt y datanex/consultas_datanex.zip")
     q.add_argument("--modelos", nargs="*", help="ficheros o carpetas de modelos (por defecto los de salidas/practica/modelos y "
                                                "los de salidas/comparacion_una_100x3)")
     q.add_argument("--salida", default="datanex")
     q.add_argument("--esquema", help=f"esquema de las tablas (por defecto {C.ESQUEMA})")
     q.add_argument("--pacientes", type=int, default=10, help="pacientes al azar para la inferencia (por defecto 10)")
     q.add_argument("--cohorte", type=int, default=1000, help="pacientes al azar para el entrenamiento (por defecto 1000)")
-    q.add_argument("--arboles", type=int, default=100)
+    q.add_argument("--entrenamientos", default="20,100", help="árboles de cada consulta de entrenamiento (por defecto 20,100)")
     q.add_argument("--profundidad", type=int, default=3)
-    q.add_argument("--eta", type=float, default=0.1)
-    q.add_argument("--bins", type=int, default=256)
-    q.add_argument("--arboles-por-consulta", type=int, default=20)
-    q = dsub.add_parser("continuar", help="lee resultados/entrenamiento_NN.csv y escribe la tanda siguiente (o el modelo)")
-    q.add_argument("csv", nargs="?", help="CSV de la última tanda (por defecto resultados/entrenamiento_NN.csv)")
+    q = dsub.add_parser("importar", help="CSV de una consulta de entrenamiento -> modelo (JSON de XGBoost e if-then)")
+    q.add_argument("csv")
     q.add_argument("--carpeta", default="datanex")
-    q = dsub.add_parser("comprobar", help="compara los CSV de inferencia con los modelos en local: resultados/comprobacion.csv")
+    q = dsub.add_parser("comprobar", help="compara los CSV de inferencia con los modelos en local: comprobacion.csv")
+    q.add_argument("--csv", help="carpeta con los CSV (por defecto datanex/resultados)")
     q.add_argument("--carpeta", default="datanex")
-    q = dsub.add_parser("ensayar", help="ejecuta un .txt en FakeNex y guarda el CSV como Athena (ensayo del flujo)")
+    q = dsub.add_parser("ensayar", help="ejecuta un .txt en FakeNex y guarda el CSV como Athena (ensayo)")
     q.add_argument("txt")
     q.add_argument("csv")
     a = ap.parse_args(argv)
@@ -214,17 +212,16 @@ def main(argv=None):
                 fich = sorted((f for f in r.iterdir() if f.suffix in (".json", ".joblib", ".pkl")),
                               key=lambda f: (orden.index(f.stem) if f.stem in orden else len(orden), f.stem)) if r.is_dir() else [r]
                 modelos += [(f.stem, f) for f in fich if f.exists()]
-            from . import entrenar as E
-            par = E.Parametros(arboles=a.arboles, profundidad=a.profundidad, eta=a.eta, bins=a.bins)
-            plan = DN.preparar(modelos, a.salida, a.pacientes, cohorte=a.cohorte, p=par, arboles_por_consulta=a.arboles_por_consulta)
-            print(f"{len(plan['modelos'])} consultas de inferencia, 1 de variables y la 1.ª de {plan['entrenamiento_tandas']} de "
-                  f"entrenamiento -> {a.salida}/consultas/ (instrucciones en {a.salida}/LEEME.md)")
+            ents = [(int(x), a.profundidad) for x in a.entrenamientos.split(",") if x.strip()]
+            plan = DN.preparar(modelos, a.salida, a.pacientes, cohorte=a.cohorte, entrenamientos=ents)
+            print(f"1 consulta de variables, {len(plan['modelos'])} de inferencia y {len(plan['entrenamientos'])} de entrenamiento "
+                  f"-> {a.salida}/consultas/ y {a.salida}/consultas_datanex.zip")
             return 0
-        if a.paso == "continuar":
-            DN.continuar(a.carpeta, a.csv)
+        if a.paso == "importar":
+            DN.importar(a.csv, a.carpeta)
             return 0
         if a.paso == "comprobar":
-            out = DN.comprobar(a.carpeta)
+            out = DN.comprobar(a.carpeta, a.csv)
             return 0 if (out.resultado == "PASA").all() else 1
         n, st = DN.ensayar(a.txt, a.csv)
         print(f"{n} filas en {st['reloj_s']} s -> {a.csv}")

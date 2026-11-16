@@ -1,6 +1,6 @@
 -- Inferencia: red_pequena (MLPClassifier) para los ingresos de 10 pacientes al azar
--- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en
--- datanex/resultados/05_inferencia_red_pequena.csv
+-- Consulta autocontenida generada por fnxsql: ejecutar en Athena (DataNex) y descargar el resultado como CSV.
+-- Una fila por ingreso: patient_ref, episode_ref, ingreso, momento, probabilidad.
 -- red_pequena (MLPClassifier), núcleo red / arrays, float32; generado por fnxsql
 -- desde el documento if-then: una fila por ingreso con la probabilidad del modelo.
 WITH
@@ -35,7 +35,7 @@ rc_num AS (
          avg(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v017,
          min(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v018,
          max(r.result_num) FILTER (WHERE r.rc_sap_ref = 'PULSIOX') AS v019
-  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref
    AND r.result_num IS NOT NULL AND r.rc_sap_ref IN ('FC', 'FR', 'PULSIOX', 'TAS', 'TEMP') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -44,7 +44,7 @@ rc_cat AS (
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_1' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v032,
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_2' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v033,
          max_by(CASE WHEN r.result_txt = 'ESTADO_CONCIENC_3' THEN 1E0 ELSE 0E0 END, r.result_date) FILTER (WHERE r.rc_sap_ref = 'ESTADO_CONCIENC') AS v034
-  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref AND r.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.rc r ON r.patient_ref = a.patient_ref
    AND r.rc_sap_ref IN ('ESTADO_CONCIENC') AND r.result_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -62,7 +62,7 @@ lab AS (
          max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LABHBST') AS v029,
          max_by(l.result_num, l.extrac_date) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v030,
          max(l.result_num) FILTER (WHERE l.lab_sap_ref = 'LAB2575') AS v031
-  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref AND l.patient_ref IN (SELECT patient_ref FROM cohorte)
+  FROM adm a JOIN datascope_gestor_prod.labs l ON l.patient_ref = a.patient_ref
    AND l.result_num IS NOT NULL AND l.lab_sap_ref IN ('LAB110', 'LAB1300', 'LAB2467', 'LAB2575', 'LABHBST', 'LABRPAK') AND l.extrac_date BETWEEN a.t_eval - INTERVAL '48' HOUR AND a.t_eval
   GROUP BY a.episode_ref
 ),
@@ -143,7 +143,7 @@ vars AS (
          -- sex_2
          CAST(CASE WHEN d.sex IS NULL THEN NULL WHEN d.sex = 2 THEN 1E0 ELSE 0E0 END AS double) AS v036
   FROM adm a
-  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref AND d.patient_ref IN (SELECT patient_ref FROM cohorte)
+  LEFT JOIN datascope_gestor_prod.demographics d ON d.patient_ref = a.patient_ref
   LEFT JOIN rc_num ON rc_num.ep_rc_num = a.episode_ref
   LEFT JOIN rc_cat ON rc_cat.ep_rc_cat = a.episode_ref
   LEFT JOIN lab ON lab.ep_lab = a.episode_ref

@@ -1,25 +1,26 @@
-"""DataNex (AWS Athena): consultas en .txt para lanzarlas a mano y lectura de los CSV que devuelve Athena.
+"""DataNex (AWS Athena): consultas autocontenidas en .txt para lanzarlas a mano y lectura de los CSV que devuelve Athena.
 
-En DataNex no hay API: se pega cada consulta en Athena y se descarga su resultado como CSV. Flujo:
+En DataNex se pega cada consulta en Athena y se descarga su resultado como CSV. Cada consulta es AISLADA: no necesita el
+resultado de otra ni ningún paso intermedio. Los pacientes se eligen dentro de la propia consulta por un hash de
+patient_ref (contrato.Cohorte), así que todas las que usan la misma cohorte ven los mismos pacientes.
 
-  preparar     escribe en datanex/consultas/:
-                 00_variables_10_pacientes.txt        las variables de los ingresos de 10 pacientes al azar
-                 NN_inferencia_<modelo>.txt           la probabilidad de cada modelo para esos mismos ingresos
-                 entrenamiento_01.txt                 la primera tanda del entrenamiento en SQL (entrenar_una.py)
-               y en datanex/documentos/ el documento if-then (float32) de cada modelo, para comprobar.
-               Los pacientes se eligen DENTRO de cada consulta por un hash de patient_ref (contrato.Cohorte): las mismas
-               consultas dan los mismos pacientes mientras la base no cambie, sin pasar listas de un paso a otro.
-  continuar    lee resultados/entrenamiento_NN.csv y escribe resultados/entrenamiento_NN+1.txt; tras la última tanda,
-               el modelo (JSON de XGBoost e if-then) y resultados/inferencia_boosting_datanex.txt
-  comprobar    compara cada resultados/<consulta>.csv de inferencia con el modelo evaluado en local sobre
-               resultados/00_variables_10_pacientes.csv y resume el entrenamiento: resultados/comprobacion.csv
-  ensayar      (opcional) ejecuta un .txt en FakeNex y guarda el CSV como lo daría Athena, para ensayar el flujo
+  preparar   escribe datanex/consultas/ (y su zip):
+               00_variables_10_pacientes.txt        variables de los ingresos de 10 pacientes al azar
+               NN_inferencia_<modelo>.txt           probabilidad de cada modelo para esos mismos ingresos
+               NN_entrenamiento_<n>_arboles.txt     entrenamiento completo en SQL (entrenar_una.py) en UNA consulta: el
+                                                    modelo sale como tabla, una fila por nodo de cada árbol
+             y datanex/documentos/ (documento if-then float32 de cada modelo, para comprobar).
+  importar   CSV de un entrenamiento -> modelo (JSON de XGBoost e if-then) y pérdidas por árbol
+  comprobar  compara cada CSV de inferencia con el modelo evaluado en local sobre el CSV de variables y resume los
+             entrenamientos: comprobacion.csv
+  ensayar    (opcional) ejecuta un .txt en FakeNex y guarda el CSV como lo daría Athena
 
-datanex/resultados/ está en .gitignore: los CSV son datos reales y el modelo entrenado también.
+datanex/resultados/ está en .gitignore: los CSV de DataNex son datos reales.
 """
 import csv
 import json
 import math
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,6 @@ import pandas as pd
 from . import binario as B, cliente, config as C, contrato as K, entrenar as E, entrenar_una as U, ir, sql as S
 
 VARIABLES_CSV = "00_variables_10_pacientes"
-NOMBRE_DATANEX = "boosting_datanex"
 
 
 def _escribir(ruta, texto):
@@ -38,15 +38,14 @@ def _escribir(ruta, texto):
     return ruta
 
 
-def _cabecera(titulo, csv_nombre, extra=""):
-    return (f"-- {titulo}\n-- Generado por fnxsql (datanex). Ejecutar en Athena (DataNex) y descargar el resultado como CSV en\n"
-            f"-- datanex/resultados/{csv_nombre}.csv{extra}\n")
+def _cabecera(titulo, extra=""):
+    return f"-- {titulo}\n-- Consulta autocontenida generada por fnxsql: ejecutar en Athena (DataNex) y descargar el resultado como CSV.{extra}\n"
 
 
 def leer_csv(ruta):
     """Filas de un CSV de Athena como lista de dicts (cabeceras en minúsculas; vacío = None)."""
+    csv.field_size_limit(1 << 30)
     with open(ruta, newline="", encoding="utf-8-sig") as f:
-        csv.field_size_limit(1 << 30)
         return [{k.strip().lower(): (v if v != "" else None) for k, v in fila.items()} for fila in csv.DictReader(f)]
 
 
@@ -65,230 +64,194 @@ def _tolerancia(doc):
 
 
 # ------------------------------------------------------------------ preparar
-def preparar(modelos, salida="datanex", pacientes=10, semilla_pacientes=1, cohorte=1000, semilla_cohorte=0, p=None,
-             arboles_por_consulta=20, variables_entrenamiento=None, precision="float32"):
-    """modelos: lista de (nombre, ruta del modelo). Escribe las consultas .txt, los documentos y plan.json."""
+def preparar(modelos, salida="datanex", pacientes=10, semilla_pacientes=1, cohorte=1000, semilla_cohorte=0,
+             entrenamientos=((20, 3), (100, 3)), variables_entrenamiento=None, precision="float32", zip_nombre="consultas_datanex.zip"):
+    """modelos: lista de (nombre, ruta del modelo). entrenamientos: (árboles, profundidad) de cada consulta de entrenamiento."""
     from .practicar import VARIABLES
     carpeta = Path(salida)
-    p = p or E.Parametros()
     contrato = K.Contrato()
     muestra = K.Cohorte(pacientes, semilla_pacientes)
-    plan = {"esquema": C.ESQUEMA, "pacientes": {"n": pacientes, "semilla": semilla_pacientes}, "modelos": [], "variables": []}
-    docs = []
-    for nombre, ruta in modelos:
-        docs.append((nombre, _doc_modelo(ruta, contrato)))
+    plan = {"esquema": C.ESQUEMA, "pacientes": {"n": pacientes, "semilla": semilla_pacientes}, "modelos": [], "variables": [],
+            "entrenamientos": []}
+    docs = [(nombre, _doc_modelo(ruta, contrato)) for nombre, ruta in modelos]
     for _, doc in docs:  # variables de todos los modelos (para una sola consulta de variables)
         for v in doc["variables"]:
             if v["nombre"] not in plan["variables"]:
                 plan["variables"].append(v["nombre"])
     vs, _ = K.variables_del_modelo(plan["variables"], contrato)
-    sql = (_cabecera(f"Variables ({len(vs)}) de los ingresos de {pacientes} pacientes al azar (para comprobar la inferencia)",
-                     VARIABLES_CSV, "\n-- Columnas v000, v001...: " + ", ".join(f"v{i:03d} = {n}" for i, n in enumerate(plan["variables"])))
+    cons = carpeta / "consultas"
+    if cons.exists():
+        for f in cons.glob("*.txt"):
+            f.unlink()
+    sql = (_cabecera(f"Variables ({len(vs)}) de los ingresos de {pacientes} pacientes al azar (los mismos que en la inferencia)",
+                     "\n-- Una fila por ingreso. Columnas v000, v001...: " + ", ".join(f"v{i:03d} = {n}" for i, n in enumerate(plan["variables"])))
            + K.sql_variables(vs, contrato, None, muestra) + "\nSELECT * FROM vars ORDER BY patient_ref, t0\n")
-    _escribir(carpeta / "consultas" / f"{VARIABLES_CSV}.txt", sql)
+    _escribir(cons / f"{VARIABLES_CSV}.txt", sql)
+    k = 0
     for k, (nombre, doc) in enumerate(docs, start=1):
         base = f"{k:02d}_inferencia_{nombre}"
         texto, info = S.compilar(doc, None, "auto", precision=precision, cohorte=muestra)
-        _escribir(carpeta / "consultas" / f"{base}.txt", _cabecera(f"Inferencia: {nombre} ({doc['modelo'].get('clase', '')}) "
-                                                                  f"para los ingresos de {pacientes} pacientes al azar", base) + texto)
-        dq = B.cuantizar(doc, precision)
-        _escribir(carpeta / "documentos" / f"{nombre}.json", json.dumps(dq, ensure_ascii=False))
+        _escribir(cons / f"{base}.txt", _cabecera(f"Inferencia: {nombre} ({doc['modelo'].get('clase', '')}) para los ingresos de "
+                                                  f"{pacientes} pacientes al azar", "\n-- Una fila por ingreso: patient_ref, "
+                                                  "episode_ref, ingreso, momento, probabilidad.") + texto)
+        _escribir(carpeta / "documentos" / f"{nombre}.json", json.dumps(B.cuantizar(doc, precision), ensure_ascii=False))
         plan["modelos"].append({"nombre": nombre, "consulta": base, "documento": f"documentos/{nombre}.json",
                                 "tipo_sql": info["tipo_sql"], "precision": precision, "bytes": info["bytes"]})
     nombres = list(variables_entrenamiento or VARIABLES)
-    estado = U.nuevo_estado(nombres, contrato, p, arboles_por_consulta, K.Cohorte(cohorte, semilla_cohorte))
-    sql, n_t = U.siguiente_consulta(estado)
-    tandas = math.ceil(p.arboles / estado["arboles_por_consulta"])
-    _escribir(carpeta / "consultas" / "entrenamiento_01.txt",
-              _cabecera(f"Entrenamiento en SQL, tanda 1 de {tandas}: árboles 1-{n_t} de {p.arboles} (profundidad {p.profundidad}, "
-                        f"eta {p.eta}, {p.bins} intervalos) con {cohorte} pacientes al azar", "entrenamiento_01",
-                        "\n-- Después: python -m fnxsql datanex continuar   (escribe la tanda siguiente)") + sql)
-    plan["entrenamiento"] = estado
-    plan["entrenamiento_tandas"] = tandas
+    co = K.Cohorte(cohorte, semilla_cohorte)
+    for arboles, prof in entrenamientos:
+        k += 1
+        p = E.Parametros(arboles=arboles, profundidad=prof)
+        variables, _ = K.variables_del_modelo(nombres, contrato)
+        base = f"{k:02d}_entrenamiento_{arboles}_arboles"
+        sql = U.sql_entrenar(variables, contrato, p, arboles, None, co, salida="tabla")
+        _escribir(cons / f"{base}.txt", _cabecera(
+            f"Entrenamiento en SQL de un gradient boosting (algoritmo de XGBoost con histogramas): {arboles} árboles de profundidad "
+            f"{prof}, eta {p.eta}, {p.bins} intervalos,\n-- con {cohorte} pacientes al azar ({p.prueba:.0%} de ellos de prueba) y "
+            f"las {len(nombres)} variables de `fnxsql practicar`; etiqueta: muerte en el ingreso.",
+            "\n-- Todo el entrenamiento ocurre dentro de esta consulta. Resultado: el modelo, una fila por nodo de cada árbol "
+            "(variable, umbral y\n-- adónde van los ausentes en los cortes; valor en las hojas; pérdida tras cada árbol). "
+            "No contiene datos de pacientes.") + sql)
+        plan["entrenamientos"].append({"consulta": base, "arboles": arboles, "profundidad": prof, "cohorte": cohorte,
+                                       "semilla": semilla_cohorte, "parametros": vars(p), "variables": nombres,
+                                       "bytes": len(sql.encode())})
     _escribir(carpeta / "plan.json", json.dumps(plan, indent=1, ensure_ascii=False))
-    _escribir(carpeta / "LEEME.md", leeme(plan, docs, tandas, len(sql.encode())))
+    _escribir(cons / "LEEME.txt", leeme(plan))
+    with zipfile.ZipFile(carpeta / zip_nombre, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(cons.glob("*.txt")):
+            z.write(f, f"consultas_datanex/{f.name}")
     return plan
 
 
-def leeme(plan, docs, tandas, bytes_e1):
-    ent = plan["entrenamiento"]
-    par = ent["parametros"]
-    filas = "\n".join(f"| `consultas/{m['consulta']}.txt` | inferencia de **{m['nombre']}** ({m['tipo_sql']}, {m['bytes'] / 1024:.0f} KB) |"
-                      for m in plan["modelos"])
-    return f"""# Prueba en DataNex (AWS Athena)
+def leeme(plan):
+    filas = [f"  {VARIABLES_CSV}.txt\n      Las {len(plan['variables'])} variables de los ingresos de {plan['pacientes']['n']} pacientes al azar."]
+    filas += [f"  {m['consulta']}.txt\n      Probabilidad del modelo {m['nombre']} para esos ingresos ({m['bytes'] / 1024:.0f} KB)."
+              for m in plan["modelos"]]
+    filas += [f"  {e['consulta']}.txt\n      Entrena {e['arboles']} árboles de profundidad {e['profundidad']} con {e['cohorte']} pacientes al azar "
+              f"y devuelve el modelo ({e['bytes'] / 1024:.0f} KB)." for e in plan["entrenamientos"]]
+    ents = plan["entrenamientos"]
+    return f"""CONSULTAS PARA DATANEX (AWS Athena) - generadas por fnxsql
+==========================================================
 
-Consultas generadas por `python -m fnxsql datanex preparar` para lanzarlas a mano en Athena. Cada una devuelve una tabla
-que se descarga como **CSV** y se guarda en `datanex/resultados/` con **el mismo nombre que la consulta** (`.txt` → `.csv`).
-`datanex/resultados/` está en `.gitignore`: ahí quedan datos reales y el modelo entrenado con ellos; no se sube.
+Cada fichero .txt es UNA consulta autocontenida: se pega en Athena, se ejecuta y se descarga su resultado como CSV.
+No dependen unas de otras. Usan las tablas del esquema {plan['esquema']} (episodes, rc, labs, demographics, adm_disch),
+las mismas que FakeNex.
 
-Esquema: `{plan['esquema']}`. Los pacientes se eligen dentro de cada consulta con un hash de `patient_ref`, entre los que
-tienen algún ingreso HOSP / HOSP_IQ: todas las consultas de inferencia usan los mismos {plan['pacientes']['n']} pacientes
-(semilla {plan['pacientes']['semilla']}) y todas las de entrenamiento los mismos {ent['cohorte']['pacientes']}
-(semilla {ent['cohorte']['semilla']}). Si la base cambia entre una consulta y otra, `continuar` lo detecta.
+Los pacientes se eligen dentro de cada consulta con un hash de patient_ref entre los que tienen algún ingreso HOSP o
+HOSP_IQ: todas las consultas de inferencia y la de variables usan los mismos {plan['pacientes']['n']} pacientes; las de
+entrenamiento, los mismos {ents[0]['cohorte'] if ents else ''} (otros).
 
-## 1. Inferencia de los modelos (10 pacientes al azar)
+Consultas
+---------
+{chr(10).join(filas)}
 
-| Consulta | Qué hace |
-|---|---|
-| `consultas/{VARIABLES_CSV}.txt` | las {len(plan['variables'])} variables de esos ingresos (para comprobar las probabilidades en local) |
-{filas}
+Resultados
+----------
+- Inferencia: una fila por ingreso (patient_ref, episode_ref, ingreso, momento, probabilidad). Los modelos son los de
+  práctica de fnxsql (entrenados con datos sintéticos de FakeNex): es una prueba de funcionamiento, no de rendimiento.
+- Variables: una fila por ingreso con las variables v000, v001... (la cabecera de la consulta dice cuál es cada una).
+- Entrenamiento: el modelo como tabla, una fila por nodo de cada árbol. Nodos en anchura: el nodo k tiene sus hijos en
+  2k+1 (se cumple float32(variable) < umbral) y 2k+2 (no se cumple); los ausentes van a 2k+1 si ausentes_izquierda es
+  true. Las hojas tienen `hoja`: la suma de las hojas de todos los árboles más margen_base da el logit
+  (probabilidad = 1 / (1 + exp(-logit))). Cada fila lleva también la pérdida logística de entrenamiento y de prueba tras
+  ese árbol. No contiene datos de pacientes.
+  Las de entrenamiento tardan más (minutos): la de {ents[0]['arboles'] if ents else ''} árboles es la prueba rápida.
 
-Cada CSV de inferencia tiene una fila por ingreso: `patient_ref, episode_ref, ingreso, momento, probabilidad`.
-Los modelos son los de práctica (entrenados con los datos sintéticos de FakeNex): la prueba es de funcionamiento, no de
-rendimiento clínico.
-
-## 2. Entrenamiento en SQL ({tandas} consultas)
-
-Gradient boosting (algoritmo de XGBoost con histogramas) entrenado **dentro de la consulta**: {par['arboles']} árboles de
-profundidad {par['profundidad']}, eta {par['eta']}, {par['bins']} intervalos, {ent['arboles_por_consulta']} árboles por consulta,
-con {ent['cohorte']['pacientes']} pacientes al azar (20 % de prueba por paciente). Variables: las {len(ent['nombres'])} de
-`fnxsql practicar`; etiqueta: muerte en el ingreso (`adm_disch`, `mot_ref` 23). Cada CSV tiene **una sola fila** con los
-árboles y las pérdidas en JSON; no contiene datos de pacientes.
-
-1. Ejecutar `consultas/entrenamiento_01.txt` ({bytes_e1 / 1024:.0f} KB) y guardar `resultados/entrenamiento_01.csv`.
-2. `python -m fnxsql datanex continuar` → escribe `resultados/entrenamiento_02.txt` (la tanda siguiente, con los cortes y
-   los árboles ya hechos dentro de la consulta). Ejecutarla y guardar `resultados/entrenamiento_02.csv`.
-3. Repetir `continuar` hasta la tanda {tandas}. Tras la última, `continuar` escribe el modelo
-   (`resultados/{NOMBRE_DATANEX}.json`, formato XGBoost) y `resultados/inferencia_{NOMBRE_DATANEX}.txt`: ejecutarla y guardar
-   su CSV (inferencia del modelo recién entrenado sobre los mismos 10 pacientes).
-
-## 3. Comprobar
-
-`python -m fnxsql datanex comprobar` → `resultados/comprobacion.csv` (y en pantalla):
-
-- cada inferencia: mismos ingresos que la consulta de variables y probabilidad del SQL = modelo evaluado en local
-  (tolerancia 1e-6 en los modelos float32 de por sí, como XGBoost; 1e-9 en los demás);
-- entrenamiento: misma cohorte en todas las tandas, cada tanda empieza con la pérdida en que acabó la anterior, pérdida
-  final de entrenamiento y de prueba.
-
-Si algo falla en Athena (sintaxis, tiempo, memoria), el mensaje de error es lo que hay que traer.
+Para comprobarlo después (en local, con fnxsql): guardar cada CSV con el mismo nombre que su consulta (.txt -> .csv) en
+una carpeta y ejecutar
+  python -m fnxsql datanex comprobar --csv <carpeta>
+que compara cada inferencia con el modelo evaluado en local sobre el CSV de variables y resume los entrenamientos; y
+  python -m fnxsql datanex importar <carpeta>/<entrenamiento>.csv
+para convertir un modelo entrenado en DataNex en un JSON de XGBoost (evaluable con `fnxsql evaluar`).
 """
 
 
-# ------------------------------------------------------------------ continuar el entrenamiento
-def _estado(carpeta):
-    r = Path(carpeta) / "resultados" / "estado_entrenamiento.json"
-    if r.exists():
-        return json.loads(r.read_text(encoding="utf-8"))
-    return json.loads((Path(carpeta) / "plan.json").read_text(encoding="utf-8"))["entrenamiento"]
-
-
-def continuar(carpeta="datanex", ruta_csv=None):
-    """Incorpora el CSV de la última tanda y escribe la consulta siguiente (o el modelo final y su inferencia)."""
-    carpeta = Path(carpeta)
-    res_dir = carpeta / "resultados"
-    plan = json.loads((carpeta / "plan.json").read_text(encoding="utf-8"))
-    estado = _estado(carpeta)
-    k = len(estado["consultas"]) + 1
-    ruta_csv = Path(ruta_csv) if ruta_csv else res_dir / f"entrenamiento_{k:02d}.csv"
-    if not ruta_csv.exists():
-        raise FileNotFoundError(f"falta {ruta_csv}: es el resultado de entrenamiento_{k:02d}.txt")
+# ------------------------------------------------------------------ importar un entrenamiento
+def importar(ruta_csv, carpeta="datanex", salida=None):
+    """CSV de una consulta de entrenamiento -> modelo (JSON de XGBoost e if-then) y pérdidas por árbol."""
+    ruta_csv = Path(ruta_csv)
+    plan = json.loads((Path(carpeta) / "plan.json").read_text(encoding="utf-8"))
+    ent = next((e for e in plan["entrenamientos"] if e["consulta"] == ruta_csv.stem), None)
+    if ent is None:
+        raise ValueError(f"{ruta_csv.name}: no corresponde a ninguna consulta de entrenamiento de {carpeta}/plan.json")
     filas = leer_csv(ruta_csv)
-    if len(filas) != 1:
-        raise ValueError(f"{ruta_csv}: se esperaba una fila y hay {len(filas)}")
-    avisos = U.incorporar(estado, filas[0], {"tanda": k, "csv": str(ruta_csv)})
-    _escribir(res_dir / "estado_entrenamiento.json", json.dumps(estado, ensure_ascii=False))
-    e, q_ = estado["perdidas_por_consulta"][-1][-1]
-    print(f"tanda {k}: {len(estado['arboles'])} de {estado['parametros']['arboles']} árboles; pérdida entrenamiento {e:.5f}, "
-          f"prueba {q_:.5f} ({estado['ingresos']['entrenamiento']} ingresos de entrenamiento, {estado['ingresos']['prueba']} de prueba)")
-    for a in avisos:
-        print(f"AVISO: {a}")
-    if not U.terminado(estado):
-        sql, n_t = U.siguiente_consulta(estado)
-        hechos = len(estado["arboles"])
-        nombre = f"entrenamiento_{k + 1:02d}"
-        _escribir(res_dir / f"{nombre}.txt",
-                  _cabecera(f"Entrenamiento en SQL, tanda {k + 1} de {plan.get('entrenamiento_tandas', '?')}: árboles "
-                            f"{hechos + 1}-{hechos + n_t} (lleva dentro los cortes y los {hechos} árboles ya entrenados)", nombre,
-                            "\n-- Después: python -m fnxsql datanex continuar") + sql)
-        print(f"-> ejecutar {res_dir / (nombre + '.txt')} ({len(sql.encode()) / 1024:.0f} KB) y guardar {res_dir / (nombre + '.csv')}")
-        return estado
-    res = U.resultado(estado)
-    doc = res["documento"]
-    doc["modelo"]["nombre"] = NOMBRE_DATANEX
-    _escribir(res_dir / f"{NOMBRE_DATANEX}.json", json.dumps(E.a_xgboost(doc, res["tasa"])))
-    _escribir(res_dir / f"{NOMBRE_DATANEX}.if_then.json", json.dumps(doc, ensure_ascii=False))
-    pd.DataFrame(res["historial"]).to_csv(res_dir / "entrenamiento_perdidas.csv", index=False)
-    muestra = K.Cohorte(plan["pacientes"]["n"], plan["pacientes"]["semilla"])
-    texto, info = S.compilar(doc, None, "auto", precision="float32", cohorte=muestra)
-    nombre = f"inferencia_{NOMBRE_DATANEX}"
-    _escribir(res_dir / f"{nombre}.txt", _cabecera(f"Inferencia del modelo entrenado en DataNex ({len(doc['nucleo']['arboles'])} "
-                                                   f"árboles) para los mismos {muestra.pacientes} pacientes", nombre) + texto)
-    print(f"entrenamiento terminado: {len(doc['nucleo']['arboles'])} árboles -> {res_dir / (NOMBRE_DATANEX + '.json')} (XGBoost)")
-    print(f"-> ejecutar {res_dir / (nombre + '.txt')} ({info['bytes'] / 1024:.0f} KB) y guardar {res_dir / (nombre + '.csv')}; "
-          "luego: python -m fnxsql datanex comprobar")
-    return estado
+    p = E.Parametros(**ent["parametros"])
+    res, historial = U.tabla_a_modelo(filas, ent["variables"], K.Contrato(), p, nombre=ruta_csv.stem)
+    salida = Path(salida or ruta_csv.parent)
+    _escribir(salida / f"{ruta_csv.stem}.modelo.json", json.dumps(res["xgboost"]))
+    _escribir(salida / f"{ruta_csv.stem}.if_then.json", json.dumps(res["documento"], ensure_ascii=False))
+    pd.DataFrame(historial).to_csv(salida / f"{ruta_csv.stem}.perdidas.csv", index=False)
+    arb = res["documento"]["nucleo"]["arboles"]
+    print(f"{len(arb)} árboles ({len(filas)} nodos), {res['ingresos']['entrenamiento']} ingresos de entrenamiento y "
+          f"{res['ingresos']['prueba']} de prueba; pérdida de prueba {historial[0]['perdida_prueba']:.4f} -> "
+          f"{historial[-1]['perdida_prueba']:.4f} -> {salida / (ruta_csv.stem + '.modelo.json')} (XGBoost)")
+    return res, historial
 
 
 # ------------------------------------------------------------------ comprobar
-def comprobar(carpeta="datanex"):
+def comprobar(carpeta="datanex", csv_dir=None):
     carpeta = Path(carpeta)
-    res_dir = carpeta / "resultados"
+    csv_dir = Path(csv_dir or carpeta / "resultados")
     plan = json.loads((carpeta / "plan.json").read_text(encoding="utf-8"))
     filas = []
-    ruta_v = res_dir / f"{VARIABLES_CSV}.csv"
+    ruta_v = csv_dir / f"{VARIABLES_CSV}.csv"
+    dv = None
     if ruta_v.exists():
         dv = pd.DataFrame(leer_csv(ruta_v))
         dv = dv.rename(columns={f"v{i:03d}": n.lower() for i, n in enumerate(plan["variables"])})
-        filas.append({"consulta": VARIABLES_CSV, "modelo": "", "resultado": "PASA" if len(dv) else "FALLA",
-                      "ingresos": len(dv), "pacientes": dv.patient_ref.nunique() if len(dv) else 0,
-                      "detalle": f"{len(plan['variables'])} variables"})
+        filas.append({"consulta": VARIABLES_CSV, "resultado": "PASA" if len(dv) else "FALLA", "ingresos": len(dv),
+                      "pacientes": dv.patient_ref.nunique() if len(dv) else 0, "detalle": f"{len(plan['variables'])} variables"})
     else:
-        dv = None
         filas.append({"consulta": VARIABLES_CSV, "resultado": "FALTA", "detalle": f"no está {ruta_v}"})
-    modelos = [(m["nombre"], m["consulta"], carpeta / m["documento"]) for m in plan["modelos"]]
-    if (res_dir / f"{NOMBRE_DATANEX}.if_then.json").exists():
-        modelos.append((NOMBRE_DATANEX, f"inferencia_{NOMBRE_DATANEX}", None))
-    for nombre, consulta, ruta_doc in modelos:
-        ruta = res_dir / f"{consulta}.csv"
+    for m in plan["modelos"]:
+        ruta = csv_dir / f"{m['consulta']}.csv"
         if not ruta.exists():
-            filas.append({"consulta": consulta, "modelo": nombre, "resultado": "FALTA", "detalle": f"no está {ruta}"})
+            filas.append({"consulta": m["consulta"], "resultado": "FALTA", "detalle": f"no está {ruta}"})
             continue
-        if ruta_doc is None:  # el entrenado en DataNex: se compila en float32 (binario.cuantizar no cambia un núcleo float32)
-            doc = B.cuantizar(json.loads((res_dir / f"{NOMBRE_DATANEX}.if_then.json").read_text(encoding="utf-8")), "float32")
-        else:
-            doc = json.loads(Path(ruta_doc).read_text(encoding="utf-8"))
+        doc = json.loads((carpeta / m["documento"]).read_text(encoding="utf-8"))
         ds = pd.DataFrame(leer_csv(ruta))
-        fila = {"consulta": consulta, "modelo": nombre, "ingresos": len(ds),
-                "pacientes": ds.patient_ref.nunique() if len(ds) else 0}
+        fila = {"consulta": m["consulta"], "ingresos": len(ds), "pacientes": ds.patient_ref.nunique() if len(ds) else 0}
         if dv is None or not len(ds):
             fila.update(resultado="FALLA" if not len(ds) else "SIN COMPROBAR",
                         detalle="sin filas" if not len(ds) else "falta el CSV de variables")
             filas.append(fila)
             continue
-        m = ds.merge(dv, on="episode_ref", how="outer", indicator=True, suffixes=("", "_v"))
-        solo = (m["_merge"] != "both").sum()
-        m = m[m["_merge"] == "both"]
-        p_sql = pd.to_numeric(m.probabilidad).to_numpy(dtype=float)
+        mm = ds.merge(dv, on="episode_ref", how="outer", indicator=True, suffixes=("", "_v"))
+        solo = int((mm["_merge"] != "both").sum())
+        mm = mm[mm["_merge"] == "both"]
+        p_sql = pd.to_numeric(mm.probabilidad).to_numpy(dtype=float)
         p_loc = np.array([ir.evaluar(doc, {v["nombre"]: (None if pd.isna(r[v["nombre"].lower()]) else float(r[v["nombre"].lower()]))
-                                           for v in doc["variables"]}) for _, r in m.iterrows()])
-        dif = float(np.abs(p_sql - p_loc).max()) if len(m) else math.nan
+                                           for v in doc["variables"]}) for _, r in mm.iterrows()])
+        dif = float(np.abs(p_sql - p_loc).max()) if len(mm) else math.nan
         tol = _tolerancia(doc)
-        ok = len(m) > 0 and solo == 0 and dif <= tol
+        ok = len(mm) > 0 and solo == 0 and dif <= tol
         fila.update(resultado="PASA" if ok else "FALLA", dif_max=dif, tolerancia=tol,
-                    detalle=f"probabilidad SQL = modelo en local (dif. máx. {dif:.1e})" + (f"; {solo} ingresos no coinciden con "
-                                                                                          "la consulta de variables" if solo else ""))
+                    detalle=f"probabilidad del SQL = modelo en local (dif. máx. {dif:.1e}, tolerancia {tol:.0e})"
+                            + (f"; {solo} ingresos no coinciden con la consulta de variables" if solo else ""))
         filas.append(fila)
-    estado_r = res_dir / "estado_entrenamiento.json"
-    if estado_r.exists():
-        est = json.loads(estado_r.read_text(encoding="utf-8"))
-        pp = est["perdidas_por_consulta"]
-        saltos = [max(abs(b[0][0] - a[-1][0]), abs(b[0][1] - a[-1][1])) for a, b in zip(pp, pp[1:])]
-        cadena = max(saltos, default=0.0)
-        fin = U.terminado(est)
-        ok = fin and cadena <= 1e-9 and pp[-1][-1][0] < pp[0][0][0]
-        filas.append({"consulta": f"entrenamiento_01-{len(pp):02d}", "modelo": NOMBRE_DATANEX,
-                      "resultado": "PASA" if ok else ("EN CURSO" if not fin else "FALLA"),
-                      "ingresos": est["ingresos"]["entrenamiento"] + est["ingresos"]["prueba"],
-                      "detalle": (f"{len(est['arboles'])} árboles en {len(pp)} consultas; {est['ingresos']['entrenamiento']} ingresos de "
-                                  f"entrenamiento ({est['ingresos']['positivos']:.0f} positivos) y {est['ingresos']['prueba']} de prueba; "
-                                  f"pérdida entrenamiento {pp[0][0][0]:.4f} -> {pp[-1][-1][0]:.4f}, prueba {pp[0][0][1]:.4f} -> "
-                                  f"{pp[-1][-1][1]:.4f}; continuidad entre tandas {cadena:.1e}")})
+    for e in plan["entrenamientos"]:
+        ruta = csv_dir / f"{e['consulta']}.csv"
+        if not ruta.exists():
+            filas.append({"consulta": e["consulta"], "resultado": "FALTA", "detalle": f"no está {ruta}"})
+            continue
+        try:
+            res, hist = U.tabla_a_modelo(leer_csv(ruta), e["variables"], K.Contrato(), E.Parametros(**e["parametros"]))
+            n_arb = len(res["documento"]["nucleo"]["arboles"])
+            ok = n_arb == e["arboles"] and hist[-1]["perdida_entrenamiento"] < hist[0]["perdida_entrenamiento"]
+            filas.append({"consulta": e["consulta"], "resultado": "PASA" if ok else "FALLA",
+                          "ingresos": res["ingresos"]["entrenamiento"] + res["ingresos"]["prueba"],
+                          "detalle": (f"{n_arb} de {e['arboles']} árboles; {res['ingresos']['entrenamiento']} ingresos de entrenamiento "
+                                      f"({res['ingresos']['positivos']:.0f} muertes) y {res['ingresos']['prueba']} de prueba; pérdida "
+                                      f"entrenamiento {hist[0]['perdida_entrenamiento']:.4f} -> {hist[-1]['perdida_entrenamiento']:.4f}, "
+                                      f"prueba {hist[0]['perdida_prueba']:.4f} -> {hist[-1]['perdida_prueba']:.4f}")})
+        except Exception as ex:  # CSV incompleto o de otra consulta
+            filas.append({"consulta": e["consulta"], "resultado": "FALLA", "detalle": f"no se puede leer el modelo: {ex}"})
     out = pd.DataFrame(filas)
-    out.to_csv(res_dir / "comprobacion.csv", index=False)
-    with pd.option_context("display.max_colwidth", 140, "display.width", 250):
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    out.to_csv(csv_dir / "comprobacion.csv", index=False)
+    with pd.option_context("display.max_colwidth", 150, "display.width", 250):
         print(out[[c for c in ("consulta", "resultado", "ingresos", "detalle") if c in out]].to_string(index=False))
-    print(f"-> {res_dir / 'comprobacion.csv'}")
+    print(f"-> {csv_dir / 'comprobacion.csv'}")
     return out
 
 
@@ -303,5 +266,6 @@ def ensayar(txt, ruta_csv):
         w.writerow(list(df.columns))
         for fila in df.itertuples(index=False):
             w.writerow(["" if v is None or (isinstance(v, float) and math.isnan(v)) else
-                        (json.dumps(v) if isinstance(v, (list, dict)) else v) for v in fila])
+                        (json.dumps(v) if isinstance(v, (list, dict)) else ("true" if v is True else "false" if v is False else v))
+                        for v in fila])
     return len(df), cliente.resumen_stats(st, reloj)

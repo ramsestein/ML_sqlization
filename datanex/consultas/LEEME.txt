@@ -1,0 +1,58 @@
+CONSULTAS PARA DATANEX (AWS Athena) - generadas por fnxsql
+==========================================================
+
+Cada fichero .txt es UNA consulta autocontenida: se pega en Athena, se ejecuta y se descarga su resultado como CSV.
+No dependen unas de otras. Usan las tablas del esquema datascope_gestor_prod (episodes, rc, labs, demographics, adm_disch),
+las mismas que FakeNex.
+
+Los pacientes se eligen dentro de cada consulta con un hash de patient_ref entre los que tienen algún ingreso HOSP o
+HOSP_IQ: todas las consultas de inferencia y la de variables usan los mismos 10 pacientes; las de
+entrenamiento, los mismos 1000 (otros).
+
+Consultas
+---------
+  00_variables_10_pacientes.txt
+      Las 37 variables de los ingresos de 10 pacientes al azar.
+  01_inferencia_logistica.txt
+      Probabilidad del modelo logistica para esos ingresos (18 KB).
+  02_inferencia_arbol.txt
+      Probabilidad del modelo arbol para esos ingresos (10 KB).
+  03_inferencia_random_forest.txt
+      Probabilidad del modelo random_forest para esos ingresos (59 KB).
+  04_inferencia_boosting.txt
+      Probabilidad del modelo boosting para esos ingresos (56 KB).
+  05_inferencia_red_pequena.txt
+      Probabilidad del modelo red_pequena para esos ingresos (14 KB).
+  06_inferencia_red_mediana.txt
+      Probabilidad del modelo red_mediana para esos ingresos (20 KB).
+  07_inferencia_red_grande.txt
+      Probabilidad del modelo red_grande para esos ingresos (84 KB).
+  08_inferencia_xgboost.txt
+      Probabilidad del modelo xgboost para esos ingresos (63 KB).
+  09_inferencia_boosting_sql.txt
+      Probabilidad del modelo boosting_sql para esos ingresos (21 KB).
+  10_inferencia_xgboost_local.txt
+      Probabilidad del modelo xgboost_local para esos ingresos (21 KB).
+  11_entrenamiento_20_arboles.txt
+      Entrena 20 árboles de profundidad 3 con 1000 pacientes al azar y devuelve el modelo (93 KB).
+  12_entrenamiento_100_arboles.txt
+      Entrena 100 árboles de profundidad 3 con 1000 pacientes al azar y devuelve el modelo (93 KB).
+
+Resultados
+----------
+- Inferencia: una fila por ingreso (patient_ref, episode_ref, ingreso, momento, probabilidad). Los modelos son los de
+  práctica de fnxsql (entrenados con datos sintéticos de FakeNex): es una prueba de funcionamiento, no de rendimiento.
+- Variables: una fila por ingreso con las variables v000, v001... (la cabecera de la consulta dice cuál es cada una).
+- Entrenamiento: el modelo como tabla, una fila por nodo de cada árbol. Nodos en anchura: el nodo k tiene sus hijos en
+  2k+1 (se cumple float32(variable) < umbral) y 2k+2 (no se cumple); los ausentes van a 2k+1 si ausentes_izquierda es
+  true. Las hojas tienen `hoja`: la suma de las hojas de todos los árboles más margen_base da el logit
+  (probabilidad = 1 / (1 + exp(-logit))). Cada fila lleva también la pérdida logística de entrenamiento y de prueba tras
+  ese árbol. No contiene datos de pacientes.
+  Las de entrenamiento tardan más (minutos): la de 20 árboles es la prueba rápida.
+
+Para comprobarlo después (en local, con fnxsql): guardar cada CSV con el mismo nombre que su consulta (.txt -> .csv) en
+una carpeta y ejecutar
+  python -m fnxsql datanex comprobar --csv <carpeta>
+que compara cada inferencia con el modelo evaluado en local sobre el CSV de variables y resume los entrenamientos; y
+  python -m fnxsql datanex importar <carpeta>/<entrenamiento>.csv
+para convertir un modelo entrenado en DataNex en un JSON de XGBoost (evaluable con `fnxsql evaluar`).
